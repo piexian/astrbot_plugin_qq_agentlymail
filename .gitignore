@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 本地研究/规划目录，不入库
+plan/
+artifacts/
+.ccg/
