@@ -93,6 +93,31 @@ class TokenStore:
         async with self.locked(account):
             await self._save_unlocked(account, bundle)
 
+    async def delete(self, account: str) -> bool:
+        """删除账号凭证文件并确认已不存在，未删除时返回 False。"""
+        async with self.locked(account):
+            path = self.path_for(account)
+            try:
+                await asyncio.to_thread(path.unlink)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise TokenStoreError(f"删除账号 {account!r} 凭证失败: {path}") from exc
+            return not path.exists()
+
+    async def list_accounts(self) -> list[str]:
+        """枚举已保存凭证的账号名。"""
+        def scan() -> list[str]:
+            try:
+                names = [
+                    path.stem.removeprefix("auth-")
+                    for path in self.root_dir.glob("auth-*.json")
+                ]
+            except OSError as exc:
+                raise TokenStoreError(f"扫描凭证目录失败: {self.root_dir}") from exc
+            return sorted(names)
+
+        return await asyncio.to_thread(scan)
     async def _load_unlocked(self, account: str) -> TokenBundle | None:
         path = self.path_for(account)
         try:
