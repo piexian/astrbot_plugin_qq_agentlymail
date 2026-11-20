@@ -579,11 +579,11 @@ class AgentlyMailSendTool(FunctionTool):
         super().__init__(
             name="agently_mail_send",
             description=(
-                "用 QQ Agently Mail 邮箱发信；send/reply/forward 默认使用当前会话绑定账号的主地址，"
+                "用 QQ Agently Mail 邮箱发信；send/reply/forward/watch_start 默认使用当前会话绑定账号的主地址，"
                 "可用 account/alias_id 指定已登录账号及其所属地址；"
                 "action=send 发新邮件（可带本地附件）；reply 回复指定邮件；"
-                "forward 转发指定邮件；watch_start/watch_stop 启停新邮件监听，"
-                "收到新邮件会自动推送到本会话。"
+                "forward 转发指定邮件；watch_start 监听所选地址，"
+                "watch_stop 停止当前会话唯一监听；收到新邮件会自动推送到本会话。"
             ),
             parameters=object_parameters(
                 {
@@ -591,8 +591,8 @@ class AgentlyMailSendTool(FunctionTool):
                         "要执行的操作",
                         ["send", "reply", "forward", "watch_start", "watch_stop"],
                     ),
-                    "account": string_param("send/reply/forward 可选账号名，缺省使用当前会话绑定账号"),
-                    "alias_id": string_param("send/reply/forward 可选邮箱地址 ID，缺省使用所选账号的主地址"),
+                    "account": string_param("send/reply/forward/watch_start 可选账号名，缺省使用当前会话绑定账号"),
+                    "alias_id": string_param("send/reply/forward/watch_start 可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "to": string_array_param("send/forward 的收件人邮箱地址"),
                     "cc": string_array_param("send 的抄送邮箱地址"),
                     "bcc": string_array_param("send 的密送邮箱地址"),
@@ -817,16 +817,25 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
-        error = await self._plugin._start_watch(event.unified_msg_origin, account)
+        error = await self._plugin._start_watch(
+            event.unified_msg_origin,
+            mailbox.account,
+            mailbox.alias_id,
+        )
         if error is not None:
             return error_result(error)
         return ok_result(
             {
-                "account": account,
-                "message": f"已开始监听账号 {account} 的新邮件，收到时会自动推送到本会话。",
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
+                "email": mailbox.email,
+                "message": (
+                    f"已开始监听账号 {mailbox.account} 的地址 {mailbox.email}，"
+                    "收到新邮件时会自动推送到本会话。"
+                ),
             }
         )
 
@@ -835,11 +844,12 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        error = self._plugin._stop_watch(event.unified_msg_origin)
+        found, error = await self._plugin._stop_watch(event.unified_msg_origin)
         if error is not None:
             return error_result(error)
+        if not found:
+            return error_result("当前会话没有在监听新邮件。")
         return ok_result({"message": "已停止新邮件监听。"})
-
 
 @dataclass
 class AgentlyMailAdminTool(FunctionTool):
@@ -941,7 +951,9 @@ class AgentlyMailAdminTool(FunctionTool):
         account = self._account_of(kwargs)
         if not account:
             return error_result("account 必须是非空字符串")
-        deleted, unbound = await self._plugin._remove_account(account)
+        deleted, unbound, error = await self._plugin._remove_account(account)
+        if error is not None:
+            return error_result(error)
         if not deleted:
             return error_result(f"账号 {account} 没有已保存的凭证。")
         return ok_result(

@@ -7,7 +7,9 @@ import json
 import os
 import tempfile
 import time
-
+from dataclasses import dataclass
+from typing import Any
+from uuid import uuid4
 import httpx
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -36,7 +38,7 @@ from .agentlymail.render import format_new_mail_notice
 from .agentlymail.session import LoginRegistry
 from .agentlymail.token_store import TokenBundle, TokenStore, TokenStoreError
 from .agentlymail.tools import make_tools
-from .agentlymail.watcher import MessageWatcher
+from .agentlymail.watcher import MAX_SEEN_MESSAGE_IDS, MessageWatcher
 from .agentlymail.web_api import register_web_apis
 
 # 设备流 expires_in 固定为 600 秒，作为登录防重入的过期上限。
@@ -48,6 +50,19 @@ BINDINGS_KEY = "umo_bindings"
 # KV 中本地发送计数的键名，值为 {账号名: {date: "YYYY-MM-DD", count: N}}。
 SEND_COUNTER_KEY = "send_counter"
 
+
+# KV 中每个会话唯一的新邮件监听配置。
+WATCH_CONFIG_KEY = "watch_configs"
+
+
+@dataclass(slots=True)
+class _WatchTaskEntry:
+    """登记一个监听任务及其持久化代次。"""
+
+    task: asyncio.Task
+    account: str
+    alias_id: str
+    watch_id: str
 
 @filter.command_group("agently")
 def agently_group():
@@ -72,16 +87,20 @@ class QQAgentlyMailPlugin(Star):
         self._clients: dict[str, tuple[AgentlyMailClient, OAuthClient]] = {}
         self._me_cache: dict[str, Me] = {}
         self._tasks: set[asyncio.Task] = set()
-        self._watch_tasks: dict[str, tuple[asyncio.Task, str]] = {}
+        self._watch_tasks: dict[str, _WatchTaskEntry] = {}
+        self._watch_config_lock = asyncio.Lock()
         self._send_counter_lock = asyncio.Lock()
         self._web_api = None
 
     async def initialize(self):
-        """注册 LLM 工具与 Web API。"""
+        """注册工具与 Web API，并恢复已持久化的新邮件监听。"""
         if self._config.get("tools_enabled", True):
             self.context.add_llm_tools(*make_tools(self))
         self._web_api = register_web_apis(self)
-
+        try:
+            await self._restore_watches()
+        except Exception:
+            logger.exception("恢复新邮件监听失败")
     async def terminate(self):
         """插件卸载时取消全部后台任务并关闭共享 HTTP 客户端。"""
         for task in self._tasks:
@@ -106,7 +125,10 @@ class QQAgentlyMailPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def logout(self, event: AstrMessageEvent, account: str = "default"):
         """删除账号凭证并解绑引用它的会话，可带账号名，缺省 default"""
-        deleted, unbound = await self._remove_account(account)
+        deleted, unbound, error = await self._remove_account(account)
+        if error is not None:
+            await event.send(event.plain_result(error))
+            return
         if not deleted:
             await event.send(event.plain_result(f"账号 {account} 没有已保存的凭证。"))
             return
@@ -115,7 +137,6 @@ class QQAgentlyMailPlugin(Star):
                 f"已删除账号 {account} 的凭证，并解除 {unbound} 个会话的绑定。",
             ),
         )
-
     @agently_group.command("status")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def status(self, event: AstrMessageEvent):
@@ -156,27 +177,32 @@ class QQAgentlyMailPlugin(Star):
             )
             return
         bindings = await self._load_bindings()
-        previous = bindings.get(event.unified_msg_origin)
-        if previous is not None and previous != account:
-            self._stop_watch(event.unified_msg_origin)
-        bindings[event.unified_msg_origin] = account
+        umo = event.unified_msg_origin
+        previous = bindings.get(umo)
+        if previous != account:
+            _, error = await self._stop_watch(umo)
+            if error is not None:
+                await event.send(event.plain_result(f"绑定失败：{error}"))
+                return
+        bindings[umo] = account
         await self._save_bindings(bindings)
         await event.send(event.plain_result(f"已把当前会话绑定到账号 {account}。"))
-
     @agently_group.command("unbind")
     async def unbind(self, event: AstrMessageEvent):
         """解除当前会话的账号绑定"""
         bindings = await self._load_bindings()
         umo = event.unified_msg_origin
-        account = bindings.pop(umo, None)
+        account = bindings.get(umo)
+        _, error = await self._stop_watch(umo)
+        if error is not None:
+            await event.send(event.plain_result(f"解除绑定失败：{error}"))
+            return
         if account is None:
-            self._stop_watch(umo)
             await event.send(event.plain_result("当前会话未绑定账号。"))
             return
-        self._stop_watch(umo)
+        bindings.pop(umo, None)
         await self._save_bindings(bindings)
         await event.send(event.plain_result(f"已解除当前会话与账号 {account} 的绑定。"))
-
     def _clients_for(self, account: str) -> tuple[AgentlyMailClient, OAuthClient]:
         """返回账号的客户端对，按需创建并缓存。"""
         pair = self._clients.get(account)
@@ -497,8 +523,17 @@ class QQAgentlyMailPlugin(Star):
         client: AgentlyMailClient,
     ) -> None:
         """登录成功后绑定发起会话、读取邮箱信息并回推。"""
-        # 凭证已在 poll 内保存，先绑定会话；绑定不依赖 /v1/me 是否成功。
+        # 凭证已在 poll 内保存，切换绑定前先清理当前会话的旧监听。
         bindings = await self._load_bindings()
+        if bindings.get(umo) != account:
+            _, error = await self._stop_watch(umo)
+            if error is not None:
+                await self._push(
+                    umo,
+                    f"账号 {account} 登录成功，但切换会话绑定失败：{error}\n"
+                    "未修改当前会话绑定。",
+                )
+                return
         bindings[umo] = account
         await self._save_bindings(bindings)
         try:
@@ -522,18 +557,56 @@ class QQAgentlyMailPlugin(Star):
             f"已自动把当前会话绑定到账号 {account}。",
         )
 
-    def _stop_watches_for_account(self, account: str) -> None:
-        """取消账号对应的全部会话监听，防止解绑或登出后继续推送。"""
-        for umo, (task, watched_account) in list(self._watch_tasks.items()):
-            if watched_account == account:
-                self._watch_tasks.pop(umo, None)
-                task.cancel()
+    async def _stop_watches_for_account(self, account: str) -> list[str]:
+        """清理账号的活动及持久化监听，返回所有清理错误。"""
+        umos = {
+            umo
+            for umo, entry in self._watch_tasks.items()
+            if entry.account == account
+        }
+        config_error = None
+        async with self._watch_config_lock:
+            try:
+                configs = await self._read_watch_configs_locked()
+            except Exception as exc:
+                logger.exception(f"读取账号 {account} 的监听配置失败")
+                configs = None
+                config_error = f"读取持久化配置失败：{exc}"
+            if configs is None:
+                config_error = config_error or "持久化配置根数据损坏，未修改原数据。"
+            else:
+                for umo, raw_config in configs.items():
+                    config = self._validate_watch_config(umo, raw_config)
+                    if config is not None and config["account"] == account:
+                        umos.add(umo)
+                    elif (
+                        isinstance(umo, str)
+                        and isinstance(raw_config, dict)
+                        and raw_config.get("account") == account
+                    ):
+                        umos.add(umo)
 
-    async def _remove_account(self, account: str) -> tuple[bool, int]:
-        """删除账号凭证并级联解绑引用它的会话，返回 (是否删除, 解绑会话数)。"""
+        errors = []
+        for umo in sorted(umos):
+            _, error = await self._stop_watch(umo)
+            if error is not None:
+                errors.append(f"会话 {umo}：{error}")
+        if config_error is not None and not errors:
+            errors.append(config_error)
+        return errors
+
+    async def _remove_account(self, account: str) -> tuple[bool, int, str | None]:
+        """先清理监听，再删除凭证和绑定，并返回明确清理错误。"""
+        cleanup_errors = await self._stop_watches_for_account(account)
+        if cleanup_errors:
+            return (
+                False,
+                0,
+                f"账号 {account} 登出失败：{'；'.join(cleanup_errors)}",
+            )
+
         if not await self._token_store.delete(account):
-            return False, 0
-        self._stop_watches_for_account(account)
+            return False, 0, None
         self._clients.pop(account, None)
         self._me_cache.pop(account, None)
         bindings = await self._load_bindings()
@@ -545,8 +618,7 @@ class QQAgentlyMailPlugin(Star):
         for bound_umo in referenced:
             del bindings[bound_umo]
         await self._save_bindings(bindings)
-        return True, len(referenced)
-
+        return True, len(referenced), None
     async def _account_snapshot(self, umo: str) -> dict:
         """枚举账号凭证与当前会话的绑定状态，供命令与工具共用。"""
         accounts = await self._token_store.list_accounts()
@@ -577,52 +649,376 @@ class QQAgentlyMailPlugin(Star):
             "login_in_flight": await self._registry.in_flight(umo),
         }
 
-    async def _start_watch(self, umo: str, account: str) -> str | None:
-        """为会话启动新邮件监听，返回错误文本或 None。"""
-        if umo in self._watch_tasks:
-            return f"当前会话已在监听账号 {self._watch_tasks[umo][1]} 的新邮件。"
-        if await self._token_store.load(account) is None:
+    async def _read_watch_configs_locked(self) -> dict[str, Any] | None:
+        """在监听锁内读取原始配置，根数据损坏时返回 None。"""
+        configs = await self.get_kv_data(WATCH_CONFIG_KEY, {})
+        if configs is None:
+            return {}
+        if not isinstance(configs, dict):
+            logger.error("新邮件监听配置根数据不是对象，未修改原数据")
+            return None
+        return dict(configs)
+
+    async def _write_watch_configs_locked(self, configs: dict[str, Any]) -> None:
+        """在监听锁内写回配置，并保留其他会话的原始记录。"""
+        await self.put_kv_data(WATCH_CONFIG_KEY, configs)
+
+    def _validate_watch_config(self, umo: Any, config: Any) -> dict[str, Any] | None:
+        """校验并规范化一条监听配置，坏记录返回 None。"""
+        if not isinstance(umo, str) or not umo:
+            logger.error(f"新邮件监听配置的会话键无效: {umo!r}")
+            return None
+        if not isinstance(config, dict):
+            logger.error(f"会话 {umo} 的监听配置不是对象: {type(config).__name__}")
+            return None
+
+        required = ("watch_id", "account", "alias_id", "next_cursor", "seen_message_ids")
+        missing = [field for field in required if field not in config]
+        if missing:
+            logger.error(f"会话 {umo} 的监听配置缺少字段: {', '.join(missing)}")
+            return None
+
+        for field in ("watch_id", "account", "alias_id"):
+            value = config[field]
+            if not isinstance(value, str) or not value.strip():
+                logger.error(
+                    f"会话 {umo} 的监听配置字段 {field} 无效: {value!r}；"
+                    f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+                )
+                return None
+
+        cursor = config["next_cursor"]
+        if cursor is not None and not isinstance(cursor, str):
+            logger.error(
+                f"会话 {umo} 的监听配置字段 next_cursor 无效: {cursor!r}；"
+                f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+            )
+            return None
+
+        seen = config["seen_message_ids"]
+        if not isinstance(seen, list) or any(
+            not isinstance(message_id, str) or not message_id for message_id in seen
+        ):
+            logger.error(
+                f"会话 {umo} 的监听配置字段 seen_message_ids 无效；"
+                f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+            )
+            return None
+
+        normalized_seen = self._normalize_watch_seen(seen)
+        if normalized_seen != seen:
+            logger.warning(
+                f"会话 {umo} 的监听去重记录已按顺序去重并截断到 "
+                f"{MAX_SEEN_MESSAGE_IDS} 项"
+            )
+
+        return {
+            "watch_id": config["watch_id"],
+            "account": config["account"],
+            "alias_id": config["alias_id"],
+            "next_cursor": cursor,
+            "seen_message_ids": normalized_seen,
+        }
+
+    @staticmethod
+    def _normalize_watch_seen(seen_message_ids: list[str]) -> list[str]:
+        """按最后出现顺序去重，并只保留末尾的有界记录。"""
+        ordered: dict[str, None] = {}
+        for message_id in seen_message_ids:
+            ordered.pop(message_id, None)
+            ordered[message_id] = None
+        return list(ordered)[-MAX_SEEN_MESSAGE_IDS:]
+
+    async def _save_watch_state(
+        self,
+        umo: str,
+        watch_id: str,
+        account: str,
+        alias_id: str,
+        next_cursor: str | None,
+        seen_message_ids: list[str],
+    ) -> None:
+        """只保存仍属于当前监听代次和账号地址的候选状态。"""
+        async with self._watch_config_lock:
+            configs = await self._read_watch_configs_locked()
+            if configs is None:
+                raise RuntimeError("新邮件监听配置根数据损坏，未保存监听状态")
+            if umo not in configs:
+                logger.debug(f"会话 {umo} 的监听配置已删除，丢弃旧任务状态")
+                return
+
+            current = self._validate_watch_config(umo, configs[umo])
+            if current is None:
+                raise RuntimeError(f"会话 {umo} 的监听配置损坏，未保存监听状态")
+            if current["watch_id"] != watch_id:
+                logger.debug(f"会话 {umo} 的监听代次已变化，丢弃旧任务状态")
+                return
+            if current["account"] != account or current["alias_id"] != alias_id:
+                logger.debug(f"会话 {umo} 的监听账号或地址已变化，丢弃旧任务状态")
+                return
+
+            candidate = self._validate_watch_config(
+                umo,
+                {
+                    "watch_id": watch_id,
+                    "account": account,
+                    "alias_id": alias_id,
+                    "next_cursor": next_cursor,
+                    "seen_message_ids": seen_message_ids,
+                },
+            )
+            if candidate is None:
+                raise ValueError(f"会话 {umo} 的候选监听状态无效")
+            configs[umo] = candidate
+            await self._write_watch_configs_locked(configs)
+
+    @staticmethod
+    def _new_watch_id() -> str:
+        """生成一次监听启动的唯一代次标识。"""
+        return uuid4().hex
+
+    @staticmethod
+    def _select_watch_alias(me: Me, alias_id: str | None) -> str | None:
+        """选择明确指定的地址，缺省时选择主地址。"""
+        if alias_id is None:
+            selected = next((alias for alias in me.aliases if alias.is_primary), None)
+        else:
+            selected = next(
+                (alias for alias in me.aliases if alias.alias_id == alias_id),
+                None,
+            )
+        return selected.alias_id if selected is not None else None
+
+    async def _start_watch(
+        self,
+        umo: str,
+        account: str,
+        alias_id: str | None = None,
+    ) -> str | None:
+        """校验账号地址并启动持久化监听，返回错误文本或 None。"""
+        try:
+            bundle = await self._token_store.load(account)
+        except TokenStoreError as exc:
+            return f"读取账号 {account} 凭证失败：{exc}"
+        if bundle is None:
             return f"账号 {account} 没有已保存的凭证，请先登录。"
+
         client, _ = self._clients_for(account)
-        task = asyncio.create_task(
-            self._watch_loop(umo, account, MessageWatcher(client)),
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(
-            lambda finished, _umo=umo, _task=task: self._discard_watch(_umo, _task)
-        )
-        self._watch_tasks[umo] = (task, account)
+        try:
+            me = await client.me()
+        except (ClientError, OAuthError, TokenStoreError) as exc:
+            return f"读取账号 {account} 的邮箱地址失败：{exc}"
+
+        selected_alias = self._select_watch_alias(me, alias_id)
+        if selected_alias is None:
+            if alias_id is None:
+                return "/v1/me 未返回 is_primary 别名"
+            return "邮箱地址不存在或不属于该账号"
+
+        async with self._watch_config_lock:
+            entry = self._watch_tasks.get(umo)
+            if entry is not None:
+                if not entry.task.done():
+                    return f"当前会话已在监听账号 {entry.account} 的新邮件。"
+                self._watch_tasks.pop(umo, None)
+
+            try:
+                configs = await self._read_watch_configs_locked()
+            except Exception as exc:
+                logger.exception(f"读取会话 {umo} 的监听配置失败")
+                return f"启动新邮件监听失败：读取持久化配置失败：{exc}"
+            if configs is None:
+                return "启动新邮件监听失败：持久化配置根数据损坏，未覆盖原数据。"
+
+            next_cursor = None
+            seen_message_ids: list[str] = []
+            if umo in configs:
+                current = self._validate_watch_config(umo, configs[umo])
+                if current is None:
+                    return "当前会话的监听配置损坏，请先停止监听清理后重试。"
+                if current["account"] != account or current["alias_id"] != selected_alias:
+                    return "当前会话已有其他账号或地址的监听配置，请先执行 watch_stop。"
+                next_cursor = current["next_cursor"]
+                seen_message_ids = current["seen_message_ids"]
+
+            watch_id = self._new_watch_id()
+            configs[umo] = {
+                "watch_id": watch_id,
+                "account": account,
+                "alias_id": selected_alias,
+                "next_cursor": next_cursor,
+                "seen_message_ids": seen_message_ids,
+            }
+            try:
+                await self._write_watch_configs_locked(configs)
+            except Exception as exc:
+                logger.exception(f"保存会话 {umo} 的监听配置失败")
+                return f"启动新邮件监听失败：保存持久化配置失败：{exc}"
+
+            async def save_state(
+                cursor: str | None,
+                seen_ids: list[str],
+            ) -> None:
+                await self._save_watch_state(
+                    umo,
+                    watch_id,
+                    account,
+                    selected_alias,
+                    cursor,
+                    seen_ids,
+                )
+
+            try:
+                watcher = MessageWatcher(
+                    client,
+                    alias_id=selected_alias,
+                    next_cursor=next_cursor,
+                    seen_message_ids=seen_message_ids,
+                    save_state=save_state,
+                )
+                task = asyncio.create_task(
+                    self._watch_loop(umo, account, selected_alias, watch_id, watcher)
+                )
+            except Exception as exc:
+                cleanup_error = None
+                try:
+                    current = configs.get(umo)
+                    if isinstance(current, dict) and current.get("watch_id") == watch_id:
+                        configs.pop(umo, None)
+                        await self._write_watch_configs_locked(configs)
+                except Exception as cleanup_exc:
+                    cleanup_error = cleanup_exc
+                logger.exception(f"创建会话 {umo} 的新邮件监听任务失败")
+                if cleanup_error is not None:
+                    return (
+                        f"创建新邮件监听任务失败：{exc}；"
+                        f"清理持久化配置也失败：{cleanup_error}"
+                    )
+                return f"创建新邮件监听任务失败：{exc}"
+
+            self._watch_tasks[umo] = _WatchTaskEntry(
+                task=task,
+                account=account,
+                alias_id=selected_alias,
+                watch_id=watch_id,
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            task.add_done_callback(
+                lambda finished, _umo=umo, _task=task, _watch_id=watch_id: (
+                    self._discard_watch(_umo, _task, _watch_id)
+                )
+            )
         return None
 
-    def _stop_watch(self, umo: str) -> str | None:
-        """停止会话的新邮件监听，返回错误文本或 None。"""
-        entry = self._watch_tasks.pop(umo, None)
-        if entry is None:
-            return "当前会话没有在监听新邮件。"
-        entry[0].cancel()
-        return None
+    async def _restore_watches(self) -> None:
+        """恢复仍有会话绑定的监听配置，逐条记录失败原因。"""
+        async with self._watch_config_lock:
+            configs = await self._read_watch_configs_locked()
+        if configs is None:
+            return
 
-    def _discard_watch(self, umo: str, task: asyncio.Task) -> None:
-        """监听任务结束后清理登记；该会话已换新任务时不动。"""
+        bindings = await self._load_bindings()
+        for umo, raw_config in configs.items():
+            config = self._validate_watch_config(umo, raw_config)
+            if config is None:
+                continue
+            bound_account = bindings.get(umo)
+            if not isinstance(bound_account, str) or not bound_account:
+                logger.warning(
+                    f"会话 {umo} 没有账号绑定，保留账号 {config['account']} 的监听配置"
+                )
+                continue
+            try:
+                error = await self._start_watch(
+                    umo,
+                    config["account"],
+                    config["alias_id"],
+                )
+            except Exception:
+                logger.exception(f"恢复会话 {umo} 的新邮件监听失败，配置已保留")
+                continue
+            if error is not None:
+                logger.warning(f"恢复会话 {umo} 的新邮件监听失败：{error}；配置已保留")
+
+    async def _stop_watch(self, umo: str) -> tuple[bool, str | None]:
+        """取消任务并删除持久化配置，返回是否发现监听及清理错误。"""
+        task = None
+        found = False
+        error = None
+
+        async with self._watch_config_lock:
+            entry = self._watch_tasks.pop(umo, None)
+            if entry is not None:
+                found = True
+                task = entry.task
+                task.cancel()
+
+            try:
+                configs = await self._read_watch_configs_locked()
+            except Exception as exc:
+                logger.exception(f"读取会话 {umo} 的监听配置失败")
+                error = f"停止新邮件监听失败：读取持久化配置失败：{exc}"
+            else:
+                if configs is None:
+                    error = "停止新邮件监听失败：持久化配置根数据损坏，未修改原数据。"
+                elif umo in configs:
+                    found = True
+                    configs.pop(umo, None)
+                    try:
+                        await self._write_watch_configs_locked(configs)
+                    except Exception as exc:
+                        logger.exception(f"删除会话 {umo} 的监听配置失败")
+                        error = f"停止新邮件监听失败：清理持久化配置失败：{exc}"
+
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        return found, error
+
+    def _discard_watch(self, umo: str, task: asyncio.Task, watch_id: str) -> None:
+        """只清理匹配会话、任务和监听代次的登记。"""
         entry = self._watch_tasks.get(umo)
-        if entry is not None and entry[0] is task:
+        if (
+            entry is not None
+            and entry.task is task
+            and entry.watch_id == watch_id
+        ):
             del self._watch_tasks[umo]
-
     async def _watch_loop(
         self,
         umo: str,
         account: str,
+        alias_id: str,
+        watch_id: str,
         watcher: MessageWatcher,
     ) -> None:
-        """循环等待新邮件并推送到会话，异常退出时说明原因。"""
+        """持续推送新邮件，网络或凭证失败时退避重连。"""
+        reconnect_delay = 5.0
         try:
-            async for message in watcher.watch():
-                await self._push(umo, format_new_mail_notice(message))
+            while True:
+                try:
+                    async for message in watcher.watch():
+                        pushed = await self._push(umo, format_new_mail_notice(message))
+                        if not pushed:
+                            raise RuntimeError("新邮件推送失败，当前事件尚未确认")
+                        reconnect_delay = 5.0
+                except (ClientError, OAuthError, TokenStoreError) as exc:
+                    logger.warning(
+                        f"账号 {account} 地址 {alias_id} 的监听 {watch_id} 连接失败：{exc}；"
+                        f"{reconnect_delay:g} 秒后重连"
+                    )
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 60.0)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            logger.warning(f"账号 {account} 的新邮件监听退出: {exc}")
-            await self._push(umo, f"账号 {account} 的新邮件监听已停止：{exc}")
-
+            logger.exception(
+                f"账号 {account} 地址 {alias_id} 的监听 {watch_id} 已停止"
+            )
+            await self._push(
+                umo,
+                f"账号 {account} 地址 {alias_id} 的新邮件监听已停止：{exc}",
+            )
     async def _record_send(self, account: str) -> None:
         """把账号的本地发送计数加一，跨日自动重置。"""
         async with self._send_counter_lock:
@@ -670,9 +1066,11 @@ class QQAgentlyMailPlugin(Star):
         """整体写回会话到账号的绑定表。"""
         await self.put_kv_data(BINDINGS_KEY, bindings)
 
-    async def _push(self, umo: str, text: str) -> None:
-        """向指定会话主动推送一条文本消息，失败只记日志。"""
+    async def _push(self, umo: str, text: str) -> bool:
+        """向指定会话主动推送文本，并返回是否发送成功。"""
         try:
             await self.context.send_message(umo, MessageChain().message(text))
         except Exception:
             logger.exception(f"向会话 {umo} 推送消息失败")
+            return False
+        return True
