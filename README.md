@@ -17,7 +17,7 @@ QQ Agently Mail 插件直连 `agent.qq.com`，提供 LLM 工具与 WebUI，目�
 
 会话绑定账号后，模型可用三个工具操作邮箱，输出统一为 JSON 文本，正文围栏包裹防注入：
 
-- `agently_mail_read`（所有用户）：`whoami` 绑定信息、`list` 分页列摘要、`read` 读全文（可下载附件到插件数据目录）、`search` 搜索、`quota` 额度估算。
+- `agently_mail_read`（所有用户）：`whoami` 绑定信息、`list` 分页列摘要、`read` 读全文（可下载附件到 AstrBot 临时目录）、`search` 搜索、`quota` 额度估算。
 - `agently_mail_send`（所有用户）：`send`/`reply`/`forward` 发信（两阶段确认、本地附件、白名单校验），`watch_start`/`watch_stop` 启停新邮件监听，新邮件自动推送到会话。
 - `agently_mail_admin`（仅管理员）：`login` 扫码登录（二维码发到会话）、`logout` 删凭证解绑、`status` 账号概览、`trash`/`empty_trash`/`permanent_delete` 删除类操作。
 

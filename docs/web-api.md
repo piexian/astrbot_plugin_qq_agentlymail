@@ -32,7 +32,7 @@
 
 - 发送：浏览器把 File 读成纯 Base64（不带 data URL 前缀），随 send body 内联提交 `attachments:[{filename,content_type?,content}]`。后端解码校验后组装协议五字段，`size`/`sha1` 由后端计算，复用浏览器 Base64 字符串。单件与总量均 ≤20MB、≤50 件；所有 POST 原始 body ≤28MiB（超限 413）。不走 upload 端点、不用 file_id。
 - 回复无附件；转发用 `include_attachments:true` 由服务端携带原附件。
-- 下载：`bridge.download("attachment", {account,alias_id,message_id,attachment_id 或 index}, filename)`。后端重读邮件定位附件，大附件用上游 download_url（不带 Bearer），落盘到 `凭证根目录/web-downloads/<uuid>/<清洗文件名>` 后经 file_response 返回；临时文件保留 10 分钟，卸载时清理该专用目录。
+- 下载：`bridge.download("attachment", {account,alias_id,message_id,attachment_id 或 index}, filename)`。后端重读邮件定位附件，大附件用上游 download_url（不带 Bearer），落盘到 `<AstrBot data>/temp/astrbot_plugin_qq_agentlymail/web-downloads/<uuid>/<清洗文件名>` 后经 file_response 返回；临时文件交由 AstrBot 临时目录统一管理，插件不再执行过期扫描或卸载清理。
 
 ## 错误码
 

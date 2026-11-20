@@ -90,14 +90,13 @@ class QQAgentlyMailPlugin(Star):
         self._watch_tasks: dict[str, _WatchTaskEntry] = {}
         self._watch_config_lock = asyncio.Lock()
         self._send_counter_lock = asyncio.Lock()
-        self._web_api = None
 
     async def initialize(self):
         """注册工具与 Web API，并恢复已持久化的新邮件监听。"""
         tools = make_tools(self)
         self.context.add_llm_tools(*tools)
         logger.info(f"[agently] LLM 工具注册完成：数量={len(tools)}")
-        self._web_api = register_web_apis(self)
+        register_web_apis(self)
         logger.debug("[agently] 插件初始化开始恢复新邮件监听")
         try:
             await self._restore_watches()
@@ -113,8 +112,6 @@ class QQAgentlyMailPlugin(Star):
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         logger.debug("[agently] 插件后台任务已取消并清理")
-        if self._web_api is not None:
-            await self._web_api.cleanup()
         await self._auth_http.aclose()
         await self._api_http.aclose()
         logger.info("[agently] 插件卸载完成")

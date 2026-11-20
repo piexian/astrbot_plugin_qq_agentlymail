@@ -19,11 +19,12 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .client import ClientError
 from .oauth import OAuthError
 from .render import format_message, format_summary_list
-from .token_store import DEFAULT_STORAGE_ROOT, TokenStoreError
+from .token_store import TokenStoreError
 
 if TYPE_CHECKING:
     from ..main import QQAgentlyMailPlugin
@@ -33,9 +34,8 @@ MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_ATTACHMENT_COUNT = 50
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
-# read 下载附件时的缺省正文截断与目录名安全字符。
+# read 读取正文时的缺省截断长度。
 DEFAULT_MAX_BODY_CHARS = 8000
-ATTACHMENTS_ROOT = DEFAULT_STORAGE_ROOT / "attachments"
 
 def _safe_path_identifier(value: str) -> bool:
     """判断协议标识是否可以安全地出现在 URL 和附件目录名中。"""
@@ -278,8 +278,13 @@ def _safe_filename(name: str) -> str:
 
 
 def _save_attachment(message_id: str, filename: str, content: bytes) -> Path:
-    """把附件字节写入插件数据目录并返回保存路径。"""
-    directory = ATTACHMENTS_ROOT / message_id
+    """把附件字节写入 AstrBot 临时目录并返回保存路径。"""
+    directory = (
+        Path(get_astrbot_temp_path())
+        / "astrbot_plugin_qq_agentlymail"
+        / "attachments"
+        / message_id
+    )
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / filename
     path.write_bytes(content)

@@ -8,8 +8,6 @@ import binascii
 import functools
 import hashlib
 import json
-import re
-import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -19,6 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from astrbot.api import logger
 from astrbot.api.web import error_response, file_response, json_response, request
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .client import AgentlyMailClient, ClientError
 from .models import Alias, Me, Message, MessageSummary, Page
@@ -47,10 +46,6 @@ DOWNLOAD_TIMEOUT = 60.0
 MAX_BODY_BYTES = 28 * 1024 * 1024
 MAX_SUBJECT_BYTES = 4096
 MAX_BODY_TEXT_BYTES = 1024 * 1024
-
-# 下载临时文件保留 10 分钟，每次下载开始时清理过期目录。
-DOWNLOAD_TTL_SECONDS = 600.0
-_UUID_DIR_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 T = TypeVar("T")
 
@@ -271,23 +266,6 @@ def _safe_filename(name: Any) -> str:
     return cleaned[:200]
 
 
-def _sweep_downloads(root: Path) -> None:
-    """只清理 web-downloads 内过期的 uuid 子目录，不触碰其他数据。"""
-    if not root.is_dir():
-        return
-    cutoff = time.time() - DOWNLOAD_TTL_SECONDS
-    removed = 0
-    for child in root.iterdir():
-        if not child.is_dir() or not _UUID_DIR_PATTERN.match(child.name):
-            continue
-        try:
-            if child.stat().st_mtime < cutoff:
-                shutil.rmtree(child)
-                removed += 1
-        except OSError:
-            logger.warning(f"清理过期下载目录失败: {child}")
-    logger.debug(f"[agently] 下载暂存清理完成：根目录={root}，删除数量={removed}")
-
 async def _read_json_body() -> dict[str, Any]:
     """读取并解析 JSON 请求体，先按原始字节判长。"""
     raw = await request.body()
@@ -403,30 +381,17 @@ class MailWebApi:
         self._plugin = plugin
 
     def _download_root(self) -> Path:
-        # 跟随凭证存储根目录，保证临时测试环境与真实环境隔离。
-        return Path(self._plugin._token_store.root_dir) / "web-downloads"
-
-    async def cleanup(self) -> None:
-        """插件卸载时清理专用下载目录。"""
-        root = self._download_root()
-        logger.debug(f"[agently] 下载目录清理开始：根目录={root}")
-
-        def _remove() -> None:
-            if root.is_dir():
-                shutil.rmtree(root)
-
-        try:
-            await asyncio.to_thread(_remove)
-        except OSError:
-            logger.warning(f"清理下载目录失败: {root}")
-            return
-        logger.debug(f"[agently] 下载目录清理完成：根目录={root}")
+        """返回 Web 附件下载暂存目录，交由 AstrBot 临时目录统一管理。"""
+        return (
+            Path(get_astrbot_temp_path())
+            / "astrbot_plugin_qq_agentlymail"
+            / "web-downloads"
+        )
 
     def _stage_download(self, content: bytes, filename: str) -> Path:
-        """把附件字节写入专用临时目录，返回文件路径。"""
+        """把附件字节写入 AstrBot 临时目录，返回文件路径。"""
         root = self._download_root()
         logger.debug(f"[agently] 下载暂存开始：根目录={root}，字节数={len(content)}")
-        _sweep_downloads(root)
         subdir = root / uuid.uuid4().hex
         subdir.mkdir(parents=True, exist_ok=True)
         path = subdir / filename
