@@ -7,7 +7,7 @@ QQ Agently Mail 插件直连 `agent.qq.com`，提供 LLM 工具与 WebUI，目�
 - `/agently login [账号名]`：管理员发起微信扫码登录（账号名缺省 `default`），二维码 2-3 分钟过期，成功后自动绑定当前会话。
 - `/agently logout [账号名]`：管理员删除该账号本地凭证并解绑引用它的会话。
 - `/agently status`：管理员列出全部账号并标注当前会话绑定。
-- `/agently bind <账号名>` / `/agently unbind`：绑定或解除当前会话的账号。
+- `/agently bind <账号名>` / `/agently unbind`：管理员绑定或解除当前会话的账号。
 
 ## WebUI
 

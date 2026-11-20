@@ -166,6 +166,7 @@ class QQAgentlyMailPlugin(Star):
         await event.send(event.plain_result("\n".join(parts)))
 
     @agently_group.command("bind")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def bind(self, event: AstrMessageEvent, account: str):
         """把当前会话绑定到指定账号"""
         if await self._token_store.load(account) is None:
@@ -187,6 +188,7 @@ class QQAgentlyMailPlugin(Star):
         await self._save_bindings(bindings)
         await event.send(event.plain_result(f"已把当前会话绑定到账号 {account}。"))
     @agently_group.command("unbind")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def unbind(self, event: AstrMessageEvent):
         """解除当前会话的账号绑定"""
         bindings = await self._load_bindings()
