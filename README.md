@@ -9,6 +9,10 @@ QQ Agently Mail 插件直连 `agent.qq.com`，提供 LLM 工具与 WebUI，目�
 - `/agently status`：管理员列出全部账号并标注当前会话绑定。
 - `/agently bind <账号名>` / `/agently unbind`：绑定或解除当前会话的账号。
 
+## WebUI
+
+插件视图 `mail` 通过 AstrBot Web API 提供真实多账号邮箱管理，支持读信、搜索、发送、附件和地址管理。前端源码位于 `web/`，构建产物位于 `views/mail/`。
+
 ## LLM 工具
 
 会话绑定账号后，模型可用三个工具操作邮箱，输出统一为 JSON 文本，正文围栏包裹防注入：

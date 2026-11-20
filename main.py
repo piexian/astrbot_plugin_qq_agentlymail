@@ -37,6 +37,7 @@ from .agentlymail.session import LoginRegistry
 from .agentlymail.token_store import TokenBundle, TokenStore, TokenStoreError
 from .agentlymail.tools import make_tools
 from .agentlymail.watcher import MessageWatcher
+from .agentlymail.web_api import register_web_apis
 
 # 设备流 expires_in 固定为 600 秒，作为登录防重入的过期上限。
 LOGIN_FLOW_TTL_SECONDS = 600.0
@@ -73,11 +74,13 @@ class QQAgentlyMailPlugin(Star):
         self._tasks: set[asyncio.Task] = set()
         self._watch_tasks: dict[str, tuple[asyncio.Task, str]] = {}
         self._send_counter_lock = asyncio.Lock()
+        self._web_api = None
 
     async def initialize(self):
-        """按配置注册 LLM 工具面。"""
+        """注册 LLM 工具与 Web API。"""
         if self._config.get("tools_enabled", True):
             self.context.add_llm_tools(*make_tools(self))
+        self._web_api = register_web_apis(self)
 
     async def terminate(self):
         """插件卸载时取消全部后台任务并关闭共享 HTTP 客户端。"""
@@ -86,6 +89,8 @@ class QQAgentlyMailPlugin(Star):
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        if self._web_api is not None:
+            await self._web_api.cleanup()
         await self._auth_http.aclose()
         await self._api_http.aclose()
 

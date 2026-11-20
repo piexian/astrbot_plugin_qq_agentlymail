@@ -5,3 +5,5 @@ repo: https://github.com/piexian/astrbot_plugin_qq_agentlymail
 version: v0.1.0
 desc: 直连 agent.qq.com 的 QQ Agently Mail 协议客户端。
 astrbot_version: ">=4.16,<5"
+views:
+  - mail

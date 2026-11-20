@@ -213,3 +213,7 @@ artifacts/
 
 # AstrBot 运行时数据（离线验证导入 astrbot 时生成）
 data/
+
+# WebUI 前端依赖
+web/node_modules/
+web/*.tsbuildinfo
