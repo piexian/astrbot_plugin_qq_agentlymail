@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+from astrbot.api import logger
 
 QRCONNECT_URL = "https://open.weixin.qq.com/connect/qrconnect"
 QR_CODE_BASE_URL = "https://open.weixin.qq.com"
@@ -28,6 +29,18 @@ BROWSER_USER_AGENT = (
 _QR_CODE_PATH_PATTERN = re.compile(r'src="(/connect/qrcode/[^\"]+)"')
 _WX_ERROR_CODE_PATTERN = re.compile(r"window\.wx_errcode\s*=\s*(-?\d+)")
 _WX_CODE_PATTERN = re.compile(r"window\.wx_code\s*=\s*'([^']*)'")
+
+
+def _safe_endpoint(value: str) -> str:
+    """返回不带 query 的端点，并隐藏二维码路径中的 uuid。"""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<invalid-url>"
+    path = parsed.path or "/"
+    if path.startswith("/connect/qrcode/"):
+        path = "/connect/qrcode/<redacted>"
+    return f"{parsed.hostname or '-'}{path}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +109,7 @@ class HeadlessQRLogin:
         deadline: float | None = None,
     ) -> HeadlessQRSession:
         """创建独立微信扫码会话并下载二维码图片。"""
+        logger.debug("[agently] 无头登录创建微信扫码会话开始")
         try:
             page = await self._request_with_deadline(
                 "GET",
@@ -114,13 +128,19 @@ class HeadlessQRLogin:
                 },
                 headers={"Accept": "text/html,application/xhtml+xml"},
             )
+            logger.debug(
+                f"[agently] 微信扫码会话页面已获取 字节数={len(page.content)}"
+            )
         except HeadlessQRLoginError:
             raise
         except Exception as exc:
-            raise HeadlessQRLoginError("transport_error", f"创建微信扫码会话失败：{exc}") from exc
-
+            logger.debug(f"[agently] 创建微信扫码会话失败 异常={type(exc).__name__}")
+            raise HeadlessQRLoginError(
+                "transport_error", "创建微信扫码会话失败"
+            ) from exc
         match = _QR_CODE_PATH_PATTERN.search(page.text)
         if match is None:
+            logger.debug("[agently] 微信扫码会话响应缺少二维码路径")
             raise HeadlessQRLoginError(
                 "invalid_response",
                 "微信扫码会话响应缺少二维码路径",
@@ -128,10 +148,12 @@ class HeadlessQRLogin:
         qr_path = match.group(1)
         uuid = qr_path.rsplit("/", 1)[-1]
         if not uuid:
+            logger.debug("[agently] 微信扫码会话响应缺少二维码 uuid")
             raise HeadlessQRLoginError(
                 "invalid_response",
                 "微信扫码会话响应缺少二维码 uuid",
             )
+        logger.debug("[agently] 微信扫码会话二维码路径解析完成")
 
         try:
             image = await self._request_with_deadline(
@@ -143,10 +165,13 @@ class HeadlessQRLogin:
         except HeadlessQRLoginError:
             raise
         except Exception as exc:
-            raise HeadlessQRLoginError("transport_error", f"下载微信二维码失败：{exc}") from exc
+            logger.debug(f"[agently] 下载微信二维码失败 异常={type(exc).__name__}")
+            raise HeadlessQRLoginError("transport_error", "下载微信二维码失败") from exc
         if not image.content:
+            logger.debug("[agently] 微信二维码响应为空")
             raise HeadlessQRLoginError("invalid_response", "微信二维码响应为空")
 
+        logger.debug(f"[agently] 微信二维码下载完成 字节数={len(image.content)}")
         return HeadlessQRSession(
             uuid=uuid,
             image=image.content,
@@ -160,10 +185,13 @@ class HeadlessQRLogin:
         on_status: Callable[[int], Awaitable[None]] | None = None,
     ) -> str:
         """轮询微信状态，收到 405 后返回 wx_code。"""
+        logger.debug("[agently] 无头登录微信轮询开始")
         last_error_code: int | None = None
         notified_status: int | None = None
         scanned_404_notified = False
+        attempt = 0
         while True:
+            attempt += 1
             params: dict[str, str] = {"uuid": session.uuid}
             if last_error_code is not None:
                 params["last"] = str(last_error_code)
@@ -175,6 +203,10 @@ class HeadlessQRLogin:
                 headers={"Accept": "text/javascript, */*; q=0.01"},
             )
             error_code, wx_code = self._parse_poll_response(response.text)
+            logger.debug(
+                f"[agently] 微信轮询状态 轮询次数={attempt} 微信状态={error_code} "
+                f"是否重试={last_error_code is not None}"
+            )
             if error_code == 404:
                 if not scanned_404_notified:
                     scanned_404_notified = True
@@ -208,6 +240,7 @@ class HeadlessQRLogin:
         deadline: float | None = None,
     ) -> Func3Result:
         """用 wx_code 获取可用邮箱和临时登录票据。"""
+        logger.debug("[agently] 无头登录 func3 开始")
         payload = await self._post_agent_login(
             {
                 "user_code": user_code,
@@ -252,6 +285,10 @@ class HeadlessQRLogin:
                     f"可用邮箱 {index} 的 is_selected 不是布尔值",
                 )
             mails.append(AvailableAgentMail(email=email, is_selected=is_selected))
+        logger.debug(
+            f"[agently] 无头登录 func3 完成 邮箱数量={len(mails)} "
+            f"已选数量={sum(mail.is_selected for mail in mails)}"
+        )
         return Func3Result(mails=tuple(mails), login_tmpticket=ticket)
 
     async def func8(
@@ -262,6 +299,7 @@ class HeadlessQRLogin:
         deadline: float | None = None,
     ) -> None:
         """显式提交邮箱和临时票据，完成网页登录确认。"""
+        logger.debug("[agently] 无头登录 func8 开始")
         await self._post_agent_login(
             {
                 "user_code": user_code,
@@ -274,6 +312,7 @@ class HeadlessQRLogin:
             deadline=deadline,
             operation="微信登录邮箱确认",
         )
+        logger.debug("[agently] 无头登录 func8 完成")
 
     async def _post_agent_login(
         self,
@@ -304,9 +343,21 @@ class HeadlessQRLogin:
         ret = payload.get("ret")
         if isinstance(ret, bool) or ret not in (0, "0"):
             code = str(ret) if isinstance(ret, (int, str)) else f"http_{response.status_code}"
+            logger.debug(
+                f"[agently] 无头登录业务失败 操作={operation} 代码={code} "
+                f"状态码={response.status_code}"
+            )
             raise HeadlessQRLoginError(code, f"{operation}失败")
         if response.is_error:
+            logger.debug(
+                f"[agently] 无头登录 HTTP 失败 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise HeadlessQRLoginError(f"http_{response.status_code}", f"{operation}失败")
+        logger.debug(
+            f"[agently] 无头登录阶段完成 操作={operation} "
+            f"状态码={response.status_code}"
+        )
         return payload
 
     async def _request_with_deadline(
@@ -318,11 +369,19 @@ class HeadlessQRLogin:
         raise_for_status: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
+        endpoint = _safe_endpoint(url)
+        started = time.perf_counter()
         request_headers = dict(kwargs.pop("headers", {}))
         request_headers.setdefault("User-Agent", BROWSER_USER_AGENT)
         kwargs["headers"] = request_headers
         remaining = None if deadline is None else deadline - time.monotonic()
+        logger.debug(
+            f"[agently] 无头登录 HTTP 开始 方法={method} 地址={endpoint} "
+            f"剩余秒数={remaining:.3f}" if remaining is not None
+            else f"[agently] 无头登录 HTTP 开始 方法={method} 地址={endpoint}"
+        )
         if remaining is not None and remaining <= 0:
+            logger.debug(f"[agently] 无头登录 请求期限已到期 地址={endpoint}")
             raise HeadlessQRLoginError("expired", "无头二维码登录已超时")
         try:
             request = self._http.request(method, url, **kwargs)
@@ -332,13 +391,25 @@ class HeadlessQRLogin:
                 response = await asyncio.wait_for(request, timeout=remaining)
             if raise_for_status:
                 response.raise_for_status()
+            logger.debug(
+                f"[agently] 无头登录 HTTP 完成 方法={method} 地址={endpoint} "
+                f"状态码={response.status_code} 耗时={time.perf_counter() - started:.3f}s"
+            )
             return response
         except asyncio.TimeoutError as exc:
+            logger.debug(
+                f"[agently] 无头登录请求超时 方法={method} 地址={endpoint} "
+                f"耗时={time.perf_counter() - started:.3f}s"
+            )
             raise HeadlessQRLoginError("expired", "无头二维码登录已超时") from exc
         except httpx.HTTPError as exc:
+            logger.warning(
+                f"[agently] 无头登录 HTTP 失败 方法={method} 地址={endpoint} "
+                f"耗时={time.perf_counter() - started:.3f}s 异常={type(exc).__name__}"
+            )
             raise HeadlessQRLoginError(
                 "transport_error",
-                f"请求 {method} {url} 失败：{exc}",
+                f"请求 {method} {endpoint} 失败",
             ) from exc
 
     @staticmethod

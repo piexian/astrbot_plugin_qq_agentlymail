@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import AsyncIterator, Any
 
+from astrbot.api import logger
+
 
 DEFAULT_STORAGE_ROOT = Path("data/plugin_data/astrbot_plugin_qq_agentlymail")
 
@@ -80,8 +82,13 @@ class TokenStore:
     @asynccontextmanager
     async def locked(self, account: str) -> AsyncIterator[None]:
         """锁定账号以便完成一次读取、刷新和落盘轮换。"""
+        logger.debug(f"[agently] 凭证存储 等待账号锁 账号={account}")
         async with self._lock_for(account):
-            yield
+            logger.debug(f"[agently] 凭证存储 已获取账号锁 账号={account}")
+            try:
+                yield
+            finally:
+                logger.debug(f"[agently] 凭证存储 释放账号锁 账号={account}")
 
     async def load(self, account: str) -> TokenBundle | None:
         """读取账号凭证，不存在时返回 None。"""
@@ -95,18 +102,31 @@ class TokenStore:
 
     async def delete(self, account: str) -> bool:
         """删除账号凭证文件并确认已不存在，未删除时返回 False。"""
+        logger.debug(f"[agently] 凭证存储 删除开始 账号={account}")
         async with self.locked(account):
             path = self.path_for(account)
             try:
                 await asyncio.to_thread(path.unlink)
             except FileNotFoundError:
+                logger.debug(f"[agently] 凭证存储 删除跳过，文件不存在 路径={path}")
                 return False
             except OSError as exc:
+                logger.warning(
+                    f"[agently] 凭证存储 删除失败 账号={account} 路径={path} "
+                    f"异常={type(exc).__name__}"
+                )
                 raise TokenStoreError(f"删除账号 {account!r} 凭证失败: {path}") from exc
-            return not path.exists()
+            deleted = not path.exists()
+            if deleted:
+                logger.info(f"[agently] 凭证存储 凭证已删除 账号={account} 路径={path}")
+            else:
+                logger.warning(f"[agently] 凭证存储 删除后文件仍存在 账号={account} 路径={path}")
+            return deleted
 
     async def list_accounts(self) -> list[str]:
         """枚举已保存凭证的账号名。"""
+        logger.debug(f"[agently] 凭证存储 扫描开始 根目录={self.root_dir}")
+
         def scan() -> list[str]:
             try:
                 names = [
@@ -114,38 +134,74 @@ class TokenStore:
                     for path in self.root_dir.glob("auth-*.json")
                 ]
             except OSError as exc:
+                logger.warning(
+                    f"[agently] 凭证存储 扫描失败 根目录={self.root_dir} "
+                    f"异常={type(exc).__name__}"
+                )
                 raise TokenStoreError(f"扫描凭证目录失败: {self.root_dir}") from exc
             return sorted(names)
 
-        return await asyncio.to_thread(scan)
+        names = await asyncio.to_thread(scan)
+        logger.debug(
+            f"[agently] 凭证存储 扫描完成 根目录={self.root_dir} 数量={len(names)}"
+        )
+        return names
+
     async def _load_unlocked(self, account: str) -> TokenBundle | None:
         path = self.path_for(account)
         try:
             content = await asyncio.to_thread(path.read_text, encoding="utf-8")
         except FileNotFoundError:
+            logger.debug(f"[agently] 凭证存储 读取未命中 账号={account} 路径={path}")
             return None
         except OSError as exc:
+            logger.warning(
+                f"[agently] 凭证存储 读取失败 账号={account} 路径={path} "
+                f"异常={type(exc).__name__}"
+            )
             raise TokenStoreError(f"读取账号 {account!r} 凭证失败: {path}") from exc
         try:
             value = json.loads(content)
         except json.JSONDecodeError as exc:
+            logger.warning(
+                f"[agently] 凭证存储 JSON 解析失败 账号={account} 路径={path} "
+                f"行={exc.lineno} 列={exc.colno}"
+            )
             raise TokenStoreError(f"解析账号 {account!r} 凭证失败: {path}") from exc
         try:
-            return TokenBundle.from_dict(value)
+            bundle = TokenBundle.from_dict(value)
         except TokenStoreError as exc:
+            logger.warning(
+                f"[agently] 凭证存储 凭证结构校验失败 账号={account} 路径={path}"
+            )
             raise TokenStoreError(f"校验账号 {account!r} 凭证失败: {path}: {exc}") from exc
+        logger.debug(
+            f"[agently] 凭证存储 读取命中 账号={account} 路径={path} "
+            f"过期时间={bundle.expires_at:.3f}"
+        )
+        return bundle
 
     async def _save_unlocked(self, account: str, bundle: TokenBundle) -> None:
         path = self.path_for(account)
+        logger.debug(
+            f"[agently] 凭证存储 保存开始 账号={account} 路径={path} "
+            f"过期时间={bundle.expires_at:.3f}"
+        )
         try:
             await asyncio.to_thread(self._write_atomic, path, bundle)
         except TokenStoreError:
             raise
         except OSError as exc:
+            logger.warning(
+                f"[agently] 凭证存储 写入失败 账号={account} 路径={path} "
+                f"异常={type(exc).__name__}"
+            )
             raise TokenStoreError(f"写入账号 {account!r} 凭证失败: {path}") from exc
+        logger.debug(f"[agently] 凭证存储 保存完成 账号={account} 路径={path}")
 
     @staticmethod
     def _write_atomic(path: Path, bundle: TokenBundle) -> None:
+        logger.debug(f"[agently] 凭证存储 原子写入开始 路径={path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             asdict(bundle),
@@ -160,6 +216,7 @@ class TokenStore:
             text=True,
         )
         temporary_path = Path(temporary_name)
+        logger.debug(f"[agently] 凭证存储 临时文件已创建 路径={temporary_path}")
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -170,9 +227,18 @@ class TokenStore:
             os.replace(temporary_path, path)
             os.chmod(path, 0o600)
         except OSError as exc:
+            logger.warning(
+                f"[agently] 凭证存储 原子写入失败 路径={path} 异常={type(exc).__name__}"
+            )
             raise TokenStoreError(f"原子替换凭证文件失败: {path}") from exc
         finally:
             try:
                 temporary_path.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                logger.warning(
+                    f"[agently] 凭证存储 临时文件清理失败 路径={temporary_path} "
+                    f"异常={type(exc).__name__}"
+                )
+        logger.debug(f"[agently] 凭证存储 原子替换完成 路径={path}")

@@ -11,9 +11,19 @@ from typing import Any, Mapping
 
 import httpx
 
+from astrbot.api import logger
+
 from .constants import AUTH_BASE, CLI_VERSION, DEVICE_PATH, TOKEN_PATH, USER_AGENT
 from .token_store import TokenBundle, TokenStore
 
+
+def _safe_endpoint(value: str) -> str:
+    """返回不含 query 和用户信息的安全请求目标。"""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<invalid-url>"
+    return f"{parsed.hostname or '-'}{parsed.path or '/'}"
 
 
 def _trusted_agent_url(value: str) -> bool:
@@ -145,22 +155,39 @@ class OAuthClient:
 
     async def start(self) -> DeviceFlowStart:
         """启动 OAuth 设备流并返回扫码地址和轮询地址。"""
-        existing = await self.token_store.load(self.account)
-        payload: dict[str, str] = {
-            "cli_agentname": "AstrBot",
-            "cli_agentua": "astrbot",
-            "cli_hostname": socket.gethostname(),
-            "cli_ua": f"agently-cli/{CLI_VERSION}",
-            "cli_version": CLI_VERSION,
-        }
-        if existing is not None and existing.app_id:
-            payload["app_id"] = existing.app_id
-        response = await self._request(
-            "POST",
-            DEVICE_PATH,
-            json=payload,
-        )
-        return DeviceFlowStart.from_payload(await self._json(response, "设备流初始化"))
+        logger.debug(f"[agently] OAuth 设备流开始 账号={self.account}")
+        try:
+            existing = await self.token_store.load(self.account)
+            logger.debug(
+                f"[agently] OAuth 设备流凭证检查 账号={self.account} "
+                f"复用应用标识={bool(existing is not None and existing.app_id)}"
+            )
+            payload: dict[str, str] = {
+                "cli_agentname": "AstrBot",
+                "cli_agentua": "astrbot",
+                "cli_hostname": socket.gethostname(),
+                "cli_ua": f"agently-cli/{CLI_VERSION}",
+                "cli_version": CLI_VERSION,
+            }
+            if existing is not None and existing.app_id:
+                payload["app_id"] = existing.app_id
+            response = await self._request(
+                "POST",
+                DEVICE_PATH,
+                json=payload,
+            )
+            flow = DeviceFlowStart.from_payload(await self._json(response, "设备流初始化"))
+            logger.debug(
+                f"[agently] OAuth 设备流初始化完成 账号={self.account} "
+                f"有效期={flow.expires_in:.0f}"
+            )
+            return flow
+        except Exception as exc:
+            logger.debug(
+                f"[agently] OAuth 设备流初始化失败 账号={self.account} "
+                f"异常={type(exc).__name__} 代码={getattr(exc, 'code', None)}"
+            )
+            raise
 
     async def poll(
         self,
@@ -172,90 +199,153 @@ class OAuthClient:
         if deadline is None or deadline > flow_deadline:
             deadline = flow_deadline
         interval = self.poll_interval
-        while True:
-            if time.monotonic() >= deadline:
-                raise AuthorizationPendingError("设备流在 expires_in 内未完成授权")
-            response = await self._request("GET", flow.poll_url)
-            try:
-                payload = await self._json(response, "设备流轮询")
-            except AuthorizationPendingError:
-                await self._sleep_until_next(interval, deadline)
-                continue
-            except SlowDownError:
-                interval += 5.0
-                await self._sleep_until_next(interval, deadline)
-                continue
-            error_code = self._error_code(payload)
-            if error_code == "authorized" or payload.get("status") == "authorized":
-                bundle = self._bundle_from_authorized(payload)
-                await self.token_store.save(self.account, bundle)
-                return bundle
-            if error_code in {"authorization_pending", "pending"} or payload.get("status") in {
-                "authorization_pending",
-                "pending",
-            }:
-                await self._sleep_until_next(interval, deadline)
-                continue
-            if error_code == "slow_down":
-                interval += 5.0
-                await self._sleep_until_next(interval, deadline)
-                continue
-            if error_code:
-                raise self._mapped_error(error_code, payload)
-            status = payload.get("status")
-            raise OAuthError(
-                "invalid_response",
-                f"设备流轮询返回未知状态: {status!r}",
+        attempt = 0
+        logger.debug(
+            f"[agently] OAuth 设备流轮询开始 账号={self.account} "
+            f"轮询间隔={interval:.1f} 剩余秒数={max(0.0, deadline - time.monotonic()):.1f}"
+        )
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise AuthorizationPendingError("设备流在 expires_in 内未完成授权")
+                attempt += 1
+                response = await self._request("GET", flow.poll_url)
+                try:
+                    payload = await self._json(response, "设备流轮询")
+                except AuthorizationPendingError:
+                    logger.debug(
+                        f"[agently] OAuth 授权等待中 账号={self.account} "
+                        f"轮询次数={attempt} 轮询间隔={interval:.1f}"
+                    )
+                    await self._sleep_until_next(interval, deadline)
+                    continue
+                except SlowDownError:
+                    interval += 5.0
+                    logger.debug(
+                        f"[agently] OAuth 收到 slow_down 账号={self.account} "
+                        f"轮询次数={attempt} 下次轮询间隔={interval:.1f}"
+                    )
+                    await self._sleep_until_next(interval, deadline)
+                    continue
+                error_code = self._error_code(payload)
+                if error_code == "authorized" or payload.get("status") == "authorized":
+                    bundle = self._bundle_from_authorized(payload)
+                    logger.debug(f"[agently] OAuth 授权成功，准备落盘 账号={self.account}")
+                    await self.token_store.save(self.account, bundle)
+                    logger.info(f"[agently] OAuth 设备授权完成 账号={self.account}")
+                    return bundle
+                if error_code in {"authorization_pending", "pending"} or payload.get("status") in {
+                    "authorization_pending",
+                    "pending",
+                }:
+                    logger.debug(
+                        f"[agently] OAuth 授权等待中 账号={self.account} "
+                        f"轮询次数={attempt} 轮询间隔={interval:.1f}"
+                    )
+                    await self._sleep_until_next(interval, deadline)
+                    continue
+                if error_code == "slow_down":
+                    interval += 5.0
+                    logger.debug(
+                        f"[agently] OAuth 收到 slow_down 账号={self.account} "
+                        f"轮询次数={attempt} 下次轮询间隔={interval:.1f}"
+                    )
+                    await self._sleep_until_next(interval, deadline)
+                    continue
+                if error_code:
+                    raise self._mapped_error(error_code, payload)
+                raise OAuthError("invalid_response", "设备流轮询返回未知状态")
+        except Exception as exc:
+            logger.debug(
+                f"[agently] OAuth 设备流轮询失败 账号={self.account} "
+                f"轮询次数={attempt} 异常={type(exc).__name__} "
+                f"代码={getattr(exc, 'code', None)}"
             )
+            raise
 
     async def refresh(self) -> TokenBundle:
         """在账号锁内刷新并立即轮换落盘 refresh token。"""
-        async with self.token_store.locked(self.account):
-            current = await self.token_store._load_unlocked(self.account)
-            if current is None:
-                raise OAuthError("missing_credentials", f"账号 {self.account!r} 没有凭证")
-            if not current.app_id:
-                raise OAuthError("missing_app_id", f"账号 {self.account!r} 凭证缺少 app_id")
-            if not current.refresh_token:
-                raise OAuthError(
-                    "missing_refresh_token",
-                    f"账号 {self.account!r} 凭证缺少 refresh_token",
+        logger.debug(f"[agently] OAuth 刷新开始，等待账号锁 账号={self.account}")
+        try:
+            async with self.token_store.locked(self.account):
+                logger.debug(f"[agently] OAuth 刷新已获取账号锁 账号={self.account}")
+                current = await self.token_store._load_unlocked(self.account)
+                if current is None:
+                    raise OAuthError("missing_credentials", f"账号 {self.account!r} 没有凭证")
+                if not current.app_id:
+                    raise OAuthError("missing_app_id", f"账号 {self.account!r} 凭证缺少 app_id")
+                if not current.refresh_token:
+                    raise OAuthError(
+                        "missing_refresh_token",
+                        f"账号 {self.account!r} 凭证缺少 refresh_token",
+                    )
+                response = await self._request(
+                    "POST",
+                    TOKEN_PATH,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": current.refresh_token,
+                        "client_id": current.app_id,
+                        "clientversion": CLI_VERSION,
+                    },
                 )
-            response = await self._request(
-                "POST",
-                TOKEN_PATH,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": current.refresh_token,
-                    "client_id": current.app_id,
-                    "clientversion": CLI_VERSION,
-                },
+                payload = await self._json(response, "凭证刷新")
+                bundle = self._bundle_from_refresh(payload, current.app_id)
+                logger.debug(f"[agently] OAuth 刷新响应有效，准备轮换落盘 账号={self.account}")
+                await self.token_store._save_unlocked(self.account, bundle)
+                logger.info(f"[agently] OAuth 凭证刷新并落盘完成 账号={self.account}")
+                return bundle
+        except Exception as exc:
+            logger.debug(
+                f"[agently] OAuth 刷新失败 账号={self.account} "
+                f"异常={type(exc).__name__} 代码={getattr(exc, 'code', None)}"
             )
-            payload = await self._json(response, "凭证刷新")
-            bundle = self._bundle_from_refresh(payload, current.app_id)
-            await self.token_store._save_unlocked(self.account, bundle)
-            return bundle
+            raise
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        endpoint = _safe_endpoint(url)
+        started = time.perf_counter()
+        logger.debug(f"[agently] OAuth HTTP 开始 方法={method} 地址={endpoint}")
         headers = dict(kwargs.pop("headers", {}))
         headers["User-Agent"] = USER_AGENT
         try:
-            return await self._http.request(method, url, headers=headers, **kwargs)
+            response = await self._http.request(method, url, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
-            raise OAuthError("transport_error", f"请求 {method} {url} 失败: {exc}") from exc
+            logger.warning(
+                f"[agently] OAuth HTTP 传输失败 方法={method} 地址={endpoint} "
+                f"耗时={time.perf_counter() - started:.3f}s 异常={type(exc).__name__}"
+            )
+            raise OAuthError("transport_error", f"请求 {method} {endpoint} 失败") from exc
+        logger.debug(
+            f"[agently] OAuth HTTP 完成 方法={method} 地址={endpoint} "
+            f"状态码={response.status_code} 耗时={time.perf_counter() - started:.3f}s"
+        )
+        return response
 
     async def _json(self, response: httpx.Response, operation: str) -> Mapping[str, Any]:
         try:
             payload = response.json()
         except ValueError as exc:
+            logger.debug(
+                f"[agently] OAuth 响应非 JSON 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise OAuthError(
                 "invalid_response",
                 f"{operation}返回非 JSON，HTTP {response.status_code}",
             ) from exc
         if not isinstance(payload, Mapping):
+            logger.debug(
+                f"[agently] OAuth 响应不是对象 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise OAuthError("invalid_response", f"{operation}返回的 JSON 不是对象")
         if response.is_error:
             code = self._error_code(payload) or f"http_{response.status_code}"
+            logger.debug(
+                f"[agently] OAuth 响应业务失败 操作={operation} "
+                f"状态码={response.status_code} 代码={code}"
+            )
             raise self._mapped_error(code, payload, response.status_code)
         return payload
 

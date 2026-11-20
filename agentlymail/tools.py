@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import mimetypes
+import time
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -133,10 +134,12 @@ async def _resolve_account(
     bindings = await plugin._load_bindings()
     account = bindings.get(event.unified_msg_origin)
     if account is None:
+        logger.warning("[agently] 工具账号解析失败：当前会话未绑定账号")
         return None, error_result(
             "当前会话未绑定账号",
             "请先执行 /agently bind <账号名> 绑定已有账号，或让管理员执行 /agently login。",
         )
+    logger.debug(f"[agently] 工具账号解析完成：账号={account}")
     return account, None
 
 
@@ -160,6 +163,7 @@ async def _resolve_mailbox(
     if "account" in kwargs:
         raw_account = kwargs["account"]
         if not isinstance(raw_account, str) or not raw_account.strip():
+            logger.warning("[agently] 工具邮箱解析失败：账号不是非空字符串")
             return None, error_result("account 必须是非空字符串")
         account = raw_account.strip()
     else:
@@ -167,39 +171,47 @@ async def _resolve_mailbox(
         if failure is not None:
             return None, failure
         if not isinstance(account, str) or not account.strip():
+            logger.warning("[agently] 工具邮箱解析失败：绑定账号无效")
             return None, error_result("当前会话绑定的账号名无效")
 
     if account in {".", ".."} or any(char in account for char in ("\x00", "/", "\\")):
+        logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
         return None, error_result("account 为空或含非法路径字符")
 
     requested_alias_id: str | None = None
     if "alias_id" in kwargs:
         raw_alias_id = kwargs["alias_id"]
         if not isinstance(raw_alias_id, str) or not raw_alias_id.strip():
+            logger.warning(f"[agently] 工具地址解析失败：账号={account}，地址标识不是非空字符串")
             return None, error_result("alias_id 必须是非空字符串")
         requested_alias_id = raw_alias_id.strip()
         if not _safe_path_identifier(requested_alias_id):
+            logger.warning(f"[agently] 工具地址解析失败：账号={account}，地址标识含非法路径字符")
             return None, error_result("alias_id 含非法路径字符")
 
     try:
         if await plugin._token_store.load(account) is None:
+            logger.warning(f"[agently] 工具凭证解析失败：账号={account}，原因=凭证不存在")
             return None, error_result(
                 f"账号 {account!r} 没有可用凭证",
                 "请先执行 /agently login <账号名>，或绑定已有账号。",
             )
     except TokenStoreError as exc:
+        logger.warning(f"[agently] 工具凭证解析失败：账号={account}，异常={type(exc).__name__}")
         return None, error_result(f"读取账号 {account!r} 凭证失败：{exc}")
 
     client, _ = plugin._clients_for(account)
     try:
         me = await client.me()
     except TokenStoreError as exc:
+        logger.warning(f"[agently] 工具凭证解析失败：账号={account}，异常={type(exc).__name__}")
         return None, error_result(f"读取账号 {account!r} 凭证失败：{exc}")
 
     selected_alias = None
     if requested_alias_id is None:
         selected_alias = next((alias for alias in me.aliases if alias.is_primary), None)
         if selected_alias is None:
+            logger.warning(f"[agently] 工具地址解析失败：账号={account}，原因=缺少主地址")
             return None, error_result("/v1/me 未返回 is_primary 别名")
     else:
         selected_alias = next(
@@ -207,8 +219,16 @@ async def _resolve_mailbox(
             None,
         )
         if selected_alias is None:
+            logger.warning(
+                f"[agently] 工具地址解析失败：账号={account}，地址ID={requested_alias_id}，"
+                "原因=地址不存在或不属于账号"
+            )
             return None, error_result("邮箱地址不存在或不属于该账号")
 
+    logger.debug(
+        f"[agently] 工具邮箱解析完成：账号={account}，地址ID={selected_alias.alias_id}，"
+        f"地址数量={len(me.aliases)}"
+    )
     return (
         _ResolvedMailbox(
             account=account,
@@ -296,6 +316,42 @@ def _load_attachments(paths: list[str]) -> list[dict[str, Any]]:
 Handler = Callable[[AstrMessageEvent, dict[str, Any]], Awaitable[ToolExecResult]]
 
 
+def _safe_tool_context(kwargs: dict[str, Any]) -> str:
+    """只提取允许写入日志的标识、布尔开关和列表数量。"""
+    fields: list[str] = []
+    identifiers = (
+        ("account", "账号"),
+        ("alias_id", "地址ID"),
+        ("message_id", "邮件ID"),
+        ("dir", "目录"),
+        ("action", "操作"),
+    )
+    for key, label in identifiers:
+        value = kwargs.get(key)
+        if isinstance(value, str) and value:
+            fields.append(f"{label}={value}")
+    switches = (
+        ("unread", "只看未读"),
+        ("reply_all", "回复全部"),
+        ("include_attachments", "包含附件"),
+    )
+    for key, label in switches:
+        value = kwargs.get(key)
+        if isinstance(value, bool):
+            fields.append(f"{label}={value}")
+    counts = (
+        ("to", "收件人数量"),
+        ("cc", "抄送数量"),
+        ("bcc", "密送数量"),
+        ("attachment_paths", "附件数量"),
+    )
+    for key, label in counts:
+        value = kwargs.get(key)
+        if isinstance(value, list):
+            fields.append(f"{label}={len(value)}")
+    return "，".join(fields)
+
+
 async def _dispatch_actions(
     tool: FunctionTool,
     actions: dict[str, Handler],
@@ -303,23 +359,51 @@ async def _dispatch_actions(
     **kwargs,
 ) -> ToolExecResult:
     """按 action 分发处理器，协议错误与未预期异常都转成 JSON 错误文本。"""
+    started = time.perf_counter()
+    context = _safe_tool_context(kwargs)
     action = kwargs.get("action")
     action = action if isinstance(action, str) else ""
+    logger.debug(f"[agently] 工具调用开始：工具={tool.name}，{context}")
     handler = actions.get(action)
     if handler is None:
+        logger.warning(f"[agently] 工具调用失败：工具={tool.name}，原因=未知操作，{context}")
         return error_result(
             f"未知 action：{action or '（空）'}",
             f"可选值：{'、'.join(actions)}。",
         )
     try:
-        return await handler(event, kwargs)
+        result = await handler(event, kwargs)
     except (ClientError, OAuthError) as exc:
-        logger.error(f"[agently] 工具 {tool.name}（{action}）失败: {exc}")
+        logger.error(
+            f"[agently] 工具协议调用失败：工具={tool.name}，{context}，"
+            f"异常={type(exc).__name__}，代码={getattr(exc, 'code', None)}，"
+            f"状态码={getattr(exc, 'status_code', None)}，"
+            f"耗时={time.perf_counter() - started:.3f}秒"
+        )
         return error_result(str(exc))
     except Exception as exc:
-        logger.exception(f"[agently] 工具 {tool.name}（{action}）异常")
+        logger.exception(
+            f"[agently] 工具调用异常：工具={tool.name}，{context}，"
+            f"耗时={time.perf_counter() - started:.3f}秒"
+        )
         return error_result(f"发生未预期的错误：{exc}")
 
+    try:
+        outcome = json.loads(result)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"[agently] 工具结果无法解析：工具={tool.name}，{context}，"
+            f"耗时={time.perf_counter() - started:.3f}秒"
+        )
+        return result
+    succeeded = isinstance(outcome, dict) and outcome.get("ok") is True
+    message = "工具调用成功" if succeeded else "工具业务失败"
+    log = logger.debug if succeeded else logger.warning
+    log(
+        f"[agently] {message}：工具={tool.name}，{context}，"
+        f"耗时={time.perf_counter() - started:.3f}秒"
+    )
+    return result
 
 @dataclass
 class AgentlyMailReadTool(FunctionTool):
@@ -383,6 +467,7 @@ class AgentlyMailReadTool(FunctionTool):
     ) -> ToolExecResult:
         event = getattr(context.context, "event", None)
         if event is None:
+            logger.warning("[agently] 工具调用拒绝：工具=agently_mail_read，原因=没有聊天会话")
             return error_result(
                 "当前调用没有关联聊天会话",
                 "请在聊天会话中使用该工具。",
@@ -498,13 +583,21 @@ class AgentlyMailReadTool(FunctionTool):
                 attachment_id,
                 alias_id=mailbox.alias_id,
             )
-            filename = _safe_filename(attachment.filename or attachment_id)
-            path = await asyncio.to_thread(
-                _save_attachment,
-                message_id,
-                filename,
-                content,
-            )
+            try:
+                filename = _safe_filename(attachment.filename or attachment_id)
+                path = await asyncio.to_thread(
+                    _save_attachment,
+                    message_id,
+                    filename,
+                    content,
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    f"[agently] 工具附件写入失败：账号={mailbox.account}，"
+                    f"地址ID={mailbox.alias_id}，邮件ID={message_id}，附件数量=1，"
+                    f"异常={type(exc).__name__}"
+                )
+                raise
             data["saved_attachment"] = {
                 "attachment_id": attachment_id,
                 "path": str(path),
@@ -633,6 +726,7 @@ class AgentlyMailSendTool(FunctionTool):
     ) -> ToolExecResult:
         event = getattr(context.context, "event", None)
         if event is None:
+            logger.warning("[agently] 工具调用拒绝：工具=agently_mail_send，原因=没有聊天会话")
             return error_result(
                 "当前调用没有关联聊天会话",
                 "请在聊天会话中使用该工具。",
@@ -693,8 +787,17 @@ class AgentlyMailSendTool(FunctionTool):
         try:
             attachments = await asyncio.to_thread(_load_attachments, attachment_paths)
         except OSError as exc:
+            logger.warning(
+                f"[agently] 工具附件读取失败：账号={mailbox.account}，"
+                f"地址ID={mailbox.alias_id}，附件数量={len(attachment_paths)}，"
+                f"异常={type(exc).__name__}"
+            )
             return error_result(f"读取附件文件失败：{exc}")
         except ValueError as exc:
+            logger.warning(
+                f"[agently] 工具附件校验失败：账号={mailbox.account}，"
+                f"地址ID={mailbox.alias_id}，附件数量={len(attachment_paths)}"
+            )
             return error_result(str(exc))
         await mailbox.client.send(
             to=to,
@@ -912,6 +1015,7 @@ class AgentlyMailAdminTool(FunctionTool):
     ) -> ToolExecResult:
         event = getattr(context.context, "event", None)
         if event is None or not event.is_admin():
+            logger.warning("[agently] 工具调用拒绝：工具=agently_mail_admin，原因=权限不足或没有聊天会话")
             return error_result("权限不足", "QQ Agently Mail 管理工具仅管理员可用。")
         return await _dispatch_actions(self, self._actions, event, **kwargs)
 

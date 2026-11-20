@@ -6,11 +6,14 @@ import asyncio
 import base64
 import hashlib
 import secrets
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
+from astrbot.api import logger
 from .constants import API_BASE, USER_AGENT
 from .models import (
     Attachment,
@@ -28,6 +31,16 @@ from .token_store import TokenStore
 # 别名管理端点在 agent.qq.com 主站，直接认 OAuth Bearer，不走 API 子域。
 MGR_URL = "https://agent.qq.com/agent/mgr"
 GETACCOUNT_URL = "https://agent.qq.com/agent/getaccount"
+
+
+
+def _safe_endpoint(value: str) -> str:
+    """返回不含 query 和用户信息的安全请求目标。"""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<invalid-url>"
+    return f"{parsed.hostname or '-'}{parsed.path or '/'}"
 
 
 class ClientError(RuntimeError):
@@ -88,16 +101,28 @@ class AgentlyMailClient:
 
     async def me(self) -> Me:
         """读取身份、别名、运行时限额和运行时约束。"""
-        payload = await self._request_json("GET", "/v1/me", "读取身份")
-        me = Me.from_payload(self._data_mapping(payload, "读取身份"))
-        self._me = me
-        self.rate_limits = me.rate_limits
-        self.constraints = me.constraints
-        if self._alias_id is None:
-            primary = next((alias for alias in me.aliases if alias.is_primary), None)
-            if primary is not None:
-                self._alias_id = primary.alias_id
-        return me
+        logger.debug(f"[agently] 客户端操作开始 操作=me 账号={self.account}")
+        try:
+            payload = await self._request_json("GET", "/v1/me", "读取身份")
+            me = Me.from_payload(self._data_mapping(payload, "读取身份"))
+            self._me = me
+            self.rate_limits = me.rate_limits
+            self.constraints = me.constraints
+            if self._alias_id is None:
+                primary = next((alias for alias in me.aliases if alias.is_primary), None)
+                if primary is not None:
+                    self._alias_id = primary.alias_id
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=me 账号={self.account} "
+                f"地址数量={len(me.aliases)}"
+            )
+            return me
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=me 账号={self.account} "
+                f"异常={type(exc).__name__}"
+            )
+            raise
 
     async def list_messages(
         self,
@@ -109,24 +134,42 @@ class AgentlyMailClient:
         unread: bool | None = None,
     ) -> Page[MessageSummary]:
         """分页读取指定别名的邮件列表，unread 为 True 时只取未读。"""
-        alias = await self._resolve_alias(alias_id)
-        self._validate_limit(limit)
-        if unread is not None and not isinstance(unread, bool):
-            raise ClientError("unread 必须是布尔值")
-        if direction not in {"inbox", "sent", "trash", "spam"}:
-            raise ClientError(f"不支持的邮件目录: {direction}")
-        params: dict[str, Any] = {"limit": limit, "dir": direction}
-        if cursor is not None:
-            params["cursor"] = cursor
-        if unread:
-            params["unread"] = "true"
-        payload = await self._request_json(
-            "GET",
-            f"/v1/aliases/{alias}/messages",
-            "读取邮件列表",
-            params=params,
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=list 账号={self.account} "
+            f"地址ID={alias_id} 目录={direction} 每页数量={limit} 只看未读={unread} "
+            f"游标存在={cursor is not None}"
         )
-        return Page.from_payload(payload, MessageSummary.from_payload)
+        try:
+            alias = await self._resolve_alias(alias_id)
+            self._validate_limit(limit)
+            if unread is not None and not isinstance(unread, bool):
+                raise ClientError("unread 必须是布尔值")
+            if direction not in {"inbox", "sent", "trash", "spam"}:
+                raise ClientError(f"不支持的邮件目录: {direction}")
+            params: dict[str, Any] = {"limit": limit, "dir": direction}
+            if cursor is not None:
+                params["cursor"] = cursor
+            if unread:
+                params["unread"] = "true"
+            payload = await self._request_json(
+                "GET",
+                f"/v1/aliases/{alias}/messages",
+                "读取邮件列表",
+                params=params,
+            )
+            page = Page.from_payload(payload, MessageSummary.from_payload)
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=list 账号={self.account} "
+                f"地址ID={alias} 数量={len(page.data)} 还有更多={page.has_more} "
+                f"下一游标存在={bool(page.next_cursor)}"
+            )
+            return page
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=list 账号={self.account} "
+                f"异常={type(exc).__name__}"
+            )
+            raise
 
     async def read(
         self,
@@ -135,14 +178,31 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Message:
         """读取指定邮件的完整内容。"""
-        alias = await self._resolve_alias(alias_id)
-        self._require_identifier(message_id, "message_id")
-        payload = await self._request_json(
-            "GET",
-            f"/v1/aliases/{alias}/messages/{message_id}",
-            "读取邮件",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=read 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id}"
         )
-        return Message.from_payload(self._data_mapping(payload, "读取邮件"))
+        try:
+            alias = await self._resolve_alias(alias_id)
+            self._require_identifier(message_id, "message_id")
+            payload = await self._request_json(
+                "GET",
+                f"/v1/aliases/{alias}/messages/{message_id}",
+                "读取邮件",
+            )
+            message = Message.from_payload(self._data_mapping(payload, "读取邮件"))
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=read 账号={self.account} "
+                f"地址ID={alias} 邮件ID={message_id} "
+                f"附件数量={len(message.attachments)}"
+            )
+            return message
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=read 账号={self.account} "
+                f"邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def search(
         self,
@@ -154,28 +214,46 @@ class AgentlyMailClient:
         cursor: str | None = None,
     ) -> Page[MessageSummary]:
         """按原始 q 参数分页搜索邮件。"""
-        alias = await self._resolve_alias(alias_id)
-        self._validate_limit(limit)
-        if search_in not in {
-            "SEARCH_IN_ALL",
-            "SEARCH_IN_SUBJECT",
-            "SEARCH_IN_CONTENT",
-        }:
-            raise ClientError(f"不支持的搜索范围: {search_in}")
-        params: dict[str, Any] = {
-            "q": query,
-            "limit": limit,
-            "search_in": search_in,
-        }
-        if cursor is not None:
-            params["cursor"] = cursor
-        payload = await self._request_json(
-            "GET",
-            f"/v1/aliases/{alias}/messages/search",
-            "搜索邮件",
-            params=params,
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=search 账号={self.account} "
+            f"地址ID={alias_id} 每页数量={limit} 搜索范围={search_in} "
+            f"游标存在={cursor is not None}"
         )
-        return Page.from_payload(payload, MessageSummary.from_payload)
+        try:
+            alias = await self._resolve_alias(alias_id)
+            self._validate_limit(limit)
+            if search_in not in {
+                "SEARCH_IN_ALL",
+                "SEARCH_IN_SUBJECT",
+                "SEARCH_IN_CONTENT",
+            }:
+                raise ClientError(f"不支持的搜索范围: {search_in}")
+            params: dict[str, Any] = {
+                "q": query,
+                "limit": limit,
+                "search_in": search_in,
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload = await self._request_json(
+                "GET",
+                f"/v1/aliases/{alias}/messages/search",
+                "搜索邮件",
+                params=params,
+            )
+            page = Page.from_payload(payload, MessageSummary.from_payload)
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=search 账号={self.account} "
+                f"地址ID={alias} 数量={len(page.data)} 还有更多={page.has_more} "
+                f"下一游标存在={bool(page.next_cursor)}"
+            )
+            return page
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=search 账号={self.account} "
+                f"异常={type(exc).__name__}"
+            )
+            raise
 
     async def send(
         self,
@@ -190,21 +268,38 @@ class AgentlyMailClient:
         attachments: Sequence[Attachment | Mapping[str, Any]] | None = None,
     ) -> Mapping[str, Any]:
         """按确认协议发送邮件。"""
-        alias = await self._resolve_alias(alias_id)
-        payload = {
-            "to": self._recipient_payload(to, "to"),
-            "cc": self._recipient_payload(cc or [], "cc"),
-            "bcc": self._recipient_payload(bcc or [], "bcc"),
-            "subject": subject,
-            "body": body,
-            "body_format": self._body_format(body_format),
-            "attachments": self._attachment_payloads(attachments or []),
-        }
-        return await self._confirmed_post(
-            f"/v1/aliases/{alias}/messages/send",
-            payload,
-            "发送邮件",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=send 账号={self.account} "
+            f"地址ID={alias_id} 收件人数量={len(to)} 抄送数量={len(cc or [])} "
+            f"密送数量={len(bcc or [])} 附件数量={len(attachments or [])}"
         )
+        try:
+            alias = await self._resolve_alias(alias_id)
+            payload = {
+                "to": self._recipient_payload(to, "to"),
+                "cc": self._recipient_payload(cc or [], "cc"),
+                "bcc": self._recipient_payload(bcc or [], "bcc"),
+                "subject": subject,
+                "body": body,
+                "body_format": self._body_format(body_format),
+                "attachments": self._attachment_payloads(attachments or []),
+            }
+            result = await self._confirmed_post(
+                f"/v1/aliases/{alias}/messages/send",
+                payload,
+                "发送邮件",
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=send 账号={self.account} "
+                f"地址ID={alias} 附件数量={len(attachments or [])}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=send 账号={self.account} "
+                f"异常={type(exc).__name__}"
+            )
+            raise
 
     async def reply(
         self,
@@ -216,20 +311,36 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Mapping[str, Any]:
         """按确认协议回复指定邮件。"""
-        alias = await self._resolve_alias(alias_id)
-        self._require_identifier(message_id, "message_id")
-        if not isinstance(reply_all, bool):
-            raise ClientError("reply_all 必须是布尔值")
-        payload = {
-            "body": body,
-            "body_format": self._body_format(body_format),
-            "reply_all": reply_all,
-        }
-        return await self._confirmed_post(
-            f"/v1/aliases/{alias}/messages/{message_id}/reply",
-            payload,
-            "回复邮件",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=reply 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id} 回复全部={reply_all}"
         )
+        try:
+            alias = await self._resolve_alias(alias_id)
+            self._require_identifier(message_id, "message_id")
+            if not isinstance(reply_all, bool):
+                raise ClientError("reply_all 必须是布尔值")
+            payload = {
+                "body": body,
+                "body_format": self._body_format(body_format),
+                "reply_all": reply_all,
+            }
+            result = await self._confirmed_post(
+                f"/v1/aliases/{alias}/messages/{message_id}/reply",
+                payload,
+                "回复邮件",
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=reply 账号={self.account} "
+                f"地址ID={alias} 邮件ID={message_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=reply 账号={self.account} "
+                f"邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def forward(
         self,
@@ -242,21 +353,38 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Mapping[str, Any]:
         """按确认协议转发指定邮件。"""
-        alias = await self._resolve_alias(alias_id)
-        self._require_identifier(message_id, "message_id")
-        if not isinstance(include_attachments, bool):
-            raise ClientError("include_attachments 必须是布尔值")
-        payload = {
-            "to": self._recipient_payload(to, "to"),
-            "body": body,
-            "body_format": self._body_format(body_format),
-            "include_attachments": include_attachments,
-        }
-        return await self._confirmed_post(
-            f"/v1/aliases/{alias}/messages/{message_id}/forward",
-            payload,
-            "转发邮件",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=forward 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id} 收件人数量={len(to)} "
+            f"包含附件={include_attachments}"
         )
+        try:
+            alias = await self._resolve_alias(alias_id)
+            self._require_identifier(message_id, "message_id")
+            if not isinstance(include_attachments, bool):
+                raise ClientError("include_attachments 必须是布尔值")
+            payload = {
+                "to": self._recipient_payload(to, "to"),
+                "body": body,
+                "body_format": self._body_format(body_format),
+                "include_attachments": include_attachments,
+            }
+            result = await self._confirmed_post(
+                f"/v1/aliases/{alias}/messages/{message_id}/forward",
+                payload,
+                "转发邮件",
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=forward 账号={self.account} "
+                f"地址ID={alias} 邮件ID={message_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=forward 账号={self.account} "
+                f"邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def trash(
         self,
@@ -265,7 +393,23 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Mapping[str, Any]:
         """将指定邮件移入垃圾箱。"""
-        return await self._delete_message(message_id, alias_id, "进垃圾箱", "")
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=trash 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id}"
+        )
+        try:
+            result = await self._delete_message(message_id, alias_id, "进垃圾箱", "")
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=trash 账号={self.account} "
+                f"邮件ID={message_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=trash 账号={self.account} "
+                f"邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def permanent_delete(
         self,
@@ -274,21 +418,53 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Mapping[str, Any]:
         """永久删除指定邮件。"""
-        return await self._delete_message(
-            message_id,
-            alias_id,
-            "永久删除邮件",
-            "/permanent",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=permanent_delete 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id}"
         )
+        try:
+            result = await self._delete_message(
+                message_id,
+                alias_id,
+                "永久删除邮件",
+                "/permanent",
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=permanent_delete "
+                f"账号={self.account} 邮件ID={message_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=permanent_delete "
+                f"账号={self.account} 邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def empty_trash(self, *, alias_id: str | None = None) -> Mapping[str, Any]:
         """永久清空指定别名的垃圾箱。"""
-        alias = await self._resolve_alias(alias_id)
-        return await self._request_json(
-            "DELETE",
-            f"/v1/aliases/{alias}/dir/trash/messages/permanent",
-            "清空垃圾箱",
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=empty_trash 账号={self.account} "
+            f"地址ID={alias_id}"
         )
+        try:
+            alias = await self._resolve_alias(alias_id)
+            result = await self._request_json(
+                "DELETE",
+                f"/v1/aliases/{alias}/dir/trash/messages/permanent",
+                "清空垃圾箱",
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=empty_trash "
+                f"账号={self.account} 地址ID={alias}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=empty_trash "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def events_wait(
         self,
@@ -297,19 +473,37 @@ class AgentlyMailClient:
         next_cursor: str | None = None,
     ) -> Mapping[str, Any]:
         """执行一次 events/wait 长轮询请求。"""
-        alias = await self._resolve_alias(alias_id)
-        params: dict[str, str] = {}
-        if next_cursor is not None:
-            params["next_cursor"] = next_cursor
-        response = await self._request(
-            "GET",
-            f"/v1/aliases/{alias}/events/wait",
-            params=params or None,
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=events_wait 账号={self.account} "
+            f"地址ID={alias_id} 游标存在={next_cursor is not None}"
         )
-        payload = await self._response_json(response, "等待邮件事件")
-        if response.is_error:
-            await self._raise_response(response, "等待邮件事件", payload)
-        return payload
+        try:
+            alias = await self._resolve_alias(alias_id)
+            params: dict[str, str] = {}
+            if next_cursor is not None:
+                params["next_cursor"] = next_cursor
+            response = await self._request(
+                "GET",
+                f"/v1/aliases/{alias}/events/wait",
+                params=params or None,
+            )
+            payload = await self._response_json(response, "等待邮件事件")
+            if response.is_error:
+                await self._raise_response(response, "等待邮件事件", payload)
+            events = payload.get("events")
+            event_count = len(events) if isinstance(events, list) else None
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=events_wait "
+                f"账号={self.account} 地址ID={alias} 事件数量={event_count} "
+                f"下一游标存在={bool(payload.get('next_cursor'))}"
+            )
+            return payload
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=events_wait "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def upload(
         self,
@@ -320,23 +514,39 @@ class AgentlyMailClient:
         alias_id: str | None = None,
     ) -> Mapping[str, Any]:
         """按协议上传一个 Base64 编码附件。"""
-        alias = await self._resolve_alias(alias_id)
-        if not isinstance(content, bytes):
-            raise ClientError("附件 content 必须是 bytes")
-        encoded = base64.b64encode(content).decode("ascii")
-        payload = {
-            "filename": filename,
-            "content_type": content_type,
-            "size": len(content),
-            "sha1": hashlib.sha1(content).hexdigest(),
-            "content": encoded,
-        }
-        return await self._request_json(
-            "POST",
-            f"/v1/aliases/{alias}/files/upload",
-            "上传附件",
-            json=payload,
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=upload 账号={self.account} "
+            f"地址ID={alias_id} 字节数={len(content) if isinstance(content, bytes) else -1}"
         )
+        try:
+            alias = await self._resolve_alias(alias_id)
+            if not isinstance(content, bytes):
+                raise ClientError("附件 content 必须是 bytes")
+            encoded = base64.b64encode(content).decode("ascii")
+            payload = {
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(content),
+                "sha1": hashlib.sha1(content).hexdigest(),
+                "content": encoded,
+            }
+            result = await self._request_json(
+                "POST",
+                f"/v1/aliases/{alias}/files/upload",
+                "上传附件",
+                json=payload,
+            )
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=upload 账号={self.account} "
+                f"地址ID={alias} 字节数={len(content)}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=upload 账号={self.account} "
+                f"异常={type(exc).__name__}"
+            )
+            raise
 
     async def download(
         self,
@@ -347,53 +557,125 @@ class AgentlyMailClient:
         download_url: str | None = None,
     ) -> bytes:
         """下载指定附件或读信响应提供的 download_url。"""
-        self._require_identifier(message_id, "message_id")
-        if download_url is not None:
-            # download_url 是可直接访问的下载地址，不带 Bearer，避免凭证泄露给外部域。
-            try:
-                response = await self._http.request(
-                    "GET", download_url, headers={"User-Agent": USER_AGENT}
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=download 账号={self.account} "
+            f"地址ID={alias_id} 邮件ID={message_id} 附件ID={attachment_id} "
+            f"来源={'download_url' if download_url is not None else 'api'}"
+        )
+        try:
+            self._require_identifier(message_id, "message_id")
+            if download_url is not None:
+                endpoint = _safe_endpoint(download_url)
+                started = time.perf_counter()
+                # download_url 是可直接访问的下载地址，不带 Bearer，避免凭证泄露给外部域。
+                try:
+                    response = await self._http.request(
+                        "GET", download_url, headers={"User-Agent": USER_AGENT}
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        f"[agently] 客户端下载传输失败 账号={self.account} "
+                        f"地址={endpoint} 异常={type(exc).__name__}"
+                    )
+                    raise ClientError("下载附件失败: 网络请求失败") from exc
+                logger.debug(
+                    f"[agently] 客户端下载 HTTP 完成 账号={self.account} "
+                    f"地址={endpoint} 状态码={response.status_code} "
+                    f"耗时={time.perf_counter() - started:.3f}s"
                 )
-            except httpx.HTTPError as exc:
-                raise ClientError(f"下载附件失败: {exc}") from exc
-        else:
-            alias = await self._resolve_alias(alias_id)
-            self._require_identifier(attachment_id, "attachment_id")
-            url = f"/v1/aliases/{alias}/messages/{message_id}/attachments/{attachment_id}"
-            response = await self._request("GET", url)
-        if response.is_error:
-            await self._raise_response(response, "下载附件")
-        return response.content
+            else:
+                alias = await self._resolve_alias(alias_id)
+                self._require_identifier(attachment_id, "attachment_id")
+                url = f"/v1/aliases/{alias}/messages/{message_id}/attachments/{attachment_id}"
+                response = await self._request("GET", url)
+            if response.is_error:
+                await self._raise_response(response, "下载附件")
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=download 账号={self.account} "
+                f"邮件ID={message_id} 字节数={len(response.content)}"
+            )
+            return response.content
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=download 账号={self.account} "
+                f"邮件ID={message_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def get_account(self) -> Mapping[str, Any]:
         """通过 getaccount 读取账号昵称与别名配额。"""
-        return await self._mgr_post(GETACCOUNT_URL, {}, "读取账号信息")
+        logger.debug(f"[agently] 客户端操作开始 操作=get_account 账号={self.account}")
+        try:
+            result = await self._mgr_post(GETACCOUNT_URL, {}, "读取账号信息")
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=get_account "
+                f"账号={self.account} 字段数量={len(result)}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=get_account "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def create_address(self) -> Mapping[str, Any]:
         """新建邮箱地址：func=7 派生前缀后立即 func=2 确认绑定。"""
-        created = await self._mgr_post(MGR_URL, {"func": "7"}, "创建邮箱地址")
-        alias = created.get("alias")
-        if not isinstance(alias, str) or not alias:
-            raise ClientError("创建邮箱地址响应缺少 alias", details=created)
-        bound = await self._mgr_post(
-            MGR_URL, {"func": "2", "new_alias": alias}, "绑定邮箱地址"
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=create_address 账号={self.account}"
         )
-        alias_id = bound.get("alias_id")
-        if not isinstance(alias_id, str) or not alias_id:
-            raise ClientError("绑定邮箱地址响应缺少 alias_id", details=bound)
-        return {
-            "alias": alias,
-            "alias_id": alias_id,
-            "is_reused": created.get("is_reused", False),
-        }
+        try:
+            created = await self._mgr_post(MGR_URL, {"func": "7"}, "创建邮箱地址")
+            alias = created.get("alias")
+            if not isinstance(alias, str) or not alias:
+                raise ClientError("创建邮箱地址响应缺少 alias", details=created)
+            bound = await self._mgr_post(
+                MGR_URL, {"func": "2", "new_alias": alias}, "绑定邮箱地址"
+            )
+            alias_id = bound.get("alias_id")
+            if not isinstance(alias_id, str) or not alias_id:
+                raise ClientError("绑定邮箱地址响应缺少 alias_id", details=bound)
+            result = {
+                "alias": alias,
+                "alias_id": alias_id,
+                "is_reused": created.get("is_reused", False),
+            }
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=create_address "
+                f"账号={self.account} 地址ID={alias_id} "
+                f"是否复用={bool(result['is_reused'])}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=create_address "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def delete_address(self, alias_id: str) -> Mapping[str, Any]:
         """注销指定邮箱地址，注销不可恢复且地址保留 90 天供复用。"""
-        self._require_identifier(alias_id, "alias_id")
-        await self._mgr_post(
-            MGR_URL, {"func": "3", "alias_id": alias_id}, "注销邮箱地址"
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=delete_address 账号={self.account} "
+            f"地址ID={alias_id}"
         )
-        return {"alias_id": alias_id}
+        try:
+            self._require_identifier(alias_id, "alias_id")
+            await self._mgr_post(
+                MGR_URL, {"func": "3", "alias_id": alias_id}, "注销邮箱地址"
+            )
+            result = {"alias_id": alias_id}
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=delete_address "
+                f"账号={self.account} 地址ID={alias_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=delete_address "
+                f"账号={self.account} 地址ID={alias_id} 异常={type(exc).__name__}"
+            )
+            raise
 
     async def _delete_message(
         self,
@@ -419,7 +701,12 @@ class AgentlyMailClient:
         first = await self._request("POST", path, json=dict(payload))
         first_payload = await self._response_json(first, operation)
         if first.is_success:
-            return self._unwrap_data(first_payload)
+            result = self._unwrap_data(first_payload)
+            logger.debug(
+                f"[agently] 客户端确认写操作完成 操作={operation} "
+                f"账号={self.account} 需要确认=False"
+            )
+            return result
         code, details, message = self._error_parts(first_payload)
         if code != "CONFIRMATION_REQUIRED":
             raise ClientError(
@@ -436,12 +723,20 @@ class AgentlyMailClient:
                 code=code,
                 details=details,
             )
+        logger.debug(
+            f"[agently] 客户端写操作需要确认 操作={operation} 账号={self.account}"
+        )
         confirmed_payload = {**payload, "confirmation_token": confirmation_token}
         second = await self._request("POST", path, json=confirmed_payload)
         second_payload = await self._response_json(second, operation)
         if second.is_error:
             await self._raise_response(second, operation, second_payload)
-        return self._unwrap_data(second_payload)
+        result = self._unwrap_data(second_payload)
+        logger.debug(
+            f"[agently] 客户端确认写操作完成 操作={operation} "
+            f"账号={self.account} 需要确认=True"
+        )
+        return result
 
     async def _mgr_post(
         self,
@@ -450,6 +745,11 @@ class AgentlyMailClient:
         operation: str,
     ) -> Mapping[str, Any]:
         """向 agent.qq.com 管理端点发表单请求，校验 head.ret 后返回 body。"""
+        func = params.get("func")
+        logger.debug(
+            f"[agently] 客户端管理请求开始 操作={operation} 账号={self.account} "
+            f"地址={_safe_endpoint(url)} 功能={func}"
+        )
         form = {**params, "language": "zh", "r": secrets.token_hex(8)}
         headers = {
             "Origin": "https://agent.qq.com",
@@ -459,6 +759,10 @@ class AgentlyMailClient:
         payload = await self._response_json(response, operation)
         head = payload.get("head")
         if not isinstance(head, Mapping):
+            logger.debug(
+                f"[agently] 客户端管理响应缺少 head 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise ClientError(
                 f"{operation}响应缺少 head",
                 status_code=response.status_code,
@@ -470,6 +774,10 @@ class AgentlyMailClient:
             message = msg if isinstance(msg, str) and msg else f"ret={ret}"
             if str(ret) == "-20002":
                 message = f"登录态失效（{message}）"
+            logger.debug(
+                f"[agently] 客户端管理响应失败 操作={operation} "
+                f"状态码={response.status_code} 返回码={ret}"
+            )
             raise ClientError(
                 f"{operation}失败: {message}",
                 status_code=response.status_code,
@@ -478,11 +786,19 @@ class AgentlyMailClient:
             )
         body = payload.get("body")
         if not isinstance(body, Mapping):
+            logger.debug(
+                f"[agently] 客户端管理响应缺少 body 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise ClientError(
                 f"{operation}响应缺少 body",
                 status_code=response.status_code,
                 details=payload,
             )
+        logger.debug(
+            f"[agently] 客户端管理请求完成 操作={operation} "
+            f"账号={self.account} 返回码={ret} 字段数量={len(body)}"
+        )
         return body
 
     async def _request_json(
@@ -504,11 +820,21 @@ class AgentlyMailClient:
         path: str,
         **kwargs: Any,
     ) -> httpx.Response:
+        endpoint = _safe_endpoint(path)
         refreshed = False
         rate_attempt = 0
+        request_attempt = 0
         while True:
+            request_attempt += 1
+            started = time.perf_counter()
+            logger.debug(
+                f"[agently] 客户端 HTTP 开始 账号={self.account} 方法={method} "
+                f"地址={endpoint} 请求次数={request_attempt} 已刷新={refreshed} "
+                f"限流重试次数={rate_attempt}"
+            )
             bundle = await self.token_store.load(self.account)
             if bundle is None:
+                logger.debug(f"[agently] 客户端请求无可用凭证 账号={self.account}")
                 raise ClientError(f"账号 {self.account!r} 没有可用凭证")
             headers = dict(kwargs.pop("headers", {}))
             headers["User-Agent"] = USER_AGENT
@@ -521,14 +847,38 @@ class AgentlyMailClient:
                     **kwargs,
                 )
             except httpx.HTTPError as exc:
-                raise ClientError(f"请求 {method} {path} 失败: {exc}") from exc
+                logger.warning(
+                    f"[agently] 客户端 HTTP 传输失败 账号={self.account} "
+                    f"方法={method} 地址={endpoint} 请求次数={request_attempt} "
+                    f"耗时={time.perf_counter() - started:.3f}s "
+                    f"异常={type(exc).__name__}"
+                )
+                raise ClientError(f"请求 {method} {endpoint} 失败") from exc
+            logger.debug(
+                f"[agently] 客户端 HTTP 响应 账号={self.account} 方法={method} "
+                f"地址={endpoint} 请求次数={request_attempt} "
+                f"状态码={response.status_code} 耗时={time.perf_counter() - started:.3f}s"
+            )
             if response.status_code == 401 and not refreshed:
-                await self._oauth.refresh()
+                logger.debug(f"[agently] 客户端收到 401，开始刷新凭证 账号={self.account}")
+                try:
+                    await self._oauth.refresh()
+                except Exception as exc:
+                    logger.warning(
+                        f"[agently] 客户端 401 凭证刷新失败 账号={self.account} "
+                        f"异常={type(exc).__name__}"
+                    )
+                    raise
                 refreshed = True
+                logger.debug(f"[agently] 客户端凭证刷新完成，准备重试 账号={self.account}")
                 continue
             if response.status_code == 429:
                 delay = min(2.0**rate_attempt, 900.0)
                 rate_attempt += 1
+                logger.debug(
+                    f"[agently] 客户端收到 429，准备重试 账号={self.account} "
+                    f"限流重试次数={rate_attempt} 延迟={delay:.1f}s"
+                )
                 await self._sleep(delay)
                 continue
             return response
@@ -567,11 +917,19 @@ class AgentlyMailClient:
         try:
             payload = response.json()
         except ValueError as exc:
+            logger.debug(
+                f"[agently] 客户端响应非 JSON 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise ClientError(
                 f"{operation}返回非 JSON，HTTP {response.status_code}",
                 status_code=response.status_code,
             ) from exc
         if not isinstance(payload, Mapping):
+            logger.debug(
+                f"[agently] 客户端响应不是对象 操作={operation} "
+                f"状态码={response.status_code}"
+            )
             raise ClientError(
                 f"{operation}返回的 JSON 不是对象",
                 status_code=response.status_code,
@@ -587,6 +945,10 @@ class AgentlyMailClient:
         if payload is None:
             payload = await AgentlyMailClient._response_json(response, operation)
         code, details, message = AgentlyMailClient._error_parts(payload)
+        logger.debug(
+            f"[agently] 客户端响应业务失败 操作={operation} "
+            f"状态码={response.status_code} 代码={code}"
+        )
         raise ClientError(
             f"{operation}失败: {message}",
             status_code=response.status_code,

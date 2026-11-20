@@ -94,23 +94,30 @@ class QQAgentlyMailPlugin(Star):
 
     async def initialize(self):
         """注册工具与 Web API，并恢复已持久化的新邮件监听。"""
-        self.context.add_llm_tools(*make_tools(self))
+        tools = make_tools(self)
+        self.context.add_llm_tools(*tools)
+        logger.info(f"[agently] LLM 工具注册完成：数量={len(tools)}")
         self._web_api = register_web_apis(self)
+        logger.debug("[agently] 插件初始化开始恢复新邮件监听")
         try:
             await self._restore_watches()
         except Exception:
             logger.exception("恢复新邮件监听失败")
+
     async def terminate(self):
         """插件卸载时取消全部后台任务并关闭共享 HTTP 客户端。"""
+        logger.debug(f"[agently] 插件卸载开始：后台任务数量={len(self._tasks)}")
         for task in self._tasks:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        logger.debug("[agently] 插件后台任务已取消并清理")
         if self._web_api is not None:
             await self._web_api.cleanup()
         await self._auth_http.aclose()
         await self._api_http.aclose()
+        logger.info("[agently] 插件卸载完成")
 
     @agently_group.command("login")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -170,6 +177,7 @@ class QQAgentlyMailPlugin(Star):
     async def bind(self, event: AstrMessageEvent, account: str):
         """把当前会话绑定到指定账号"""
         if await self._token_store.load(account) is None:
+            logger.warning(f"[agently] 绑定失败：账号={account}，原因=凭证不存在")
             await event.send(
                 event.plain_result(
                     f"账号 {account} 没有已保存的凭证，请先执行 /agently login {account}。",
@@ -180,13 +188,18 @@ class QQAgentlyMailPlugin(Star):
         umo = event.unified_msg_origin
         previous = bindings.get(umo)
         if previous != account:
+            logger.debug(
+                f"[agently] 绑定账号变化，准备停止旧监听：账号={account}，原账号={previous}"
+            )
             _, error = await self._stop_watch(umo)
             if error is not None:
                 await event.send(event.plain_result(f"绑定失败：{error}"))
                 return
         bindings[umo] = account
         await self._save_bindings(bindings)
+        logger.info(f"[agently] 会话绑定完成：账号={account}，绑定数量={len(bindings)}")
         await event.send(event.plain_result(f"已把当前会话绑定到账号 {account}。"))
+
     @agently_group.command("unbind")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def unbind(self, event: AstrMessageEvent):
@@ -199,15 +212,19 @@ class QQAgentlyMailPlugin(Star):
             await event.send(event.plain_result(f"解除绑定失败：{error}"))
             return
         if account is None:
+            logger.debug("[agently] 解除绑定跳过：当前会话未绑定账号")
             await event.send(event.plain_result("当前会话未绑定账号。"))
             return
         bindings.pop(umo, None)
         await self._save_bindings(bindings)
+        logger.info(f"[agently] 会话解绑完成：账号={account}，绑定数量={len(bindings)}")
         await event.send(event.plain_result(f"已解除当前会话与账号 {account} 的绑定。"))
+
     def _clients_for(self, account: str) -> tuple[AgentlyMailClient, OAuthClient]:
         """返回账号的客户端对，按需创建并缓存。"""
         pair = self._clients.get(account)
         if pair is None:
+            logger.debug(f"[agently] 创建账号客户端缓存：账号={account}")
             oauth = OAuthClient(self._token_store, account, self._auth_http)
             client = AgentlyMailClient(
                 self._token_store,
@@ -222,19 +239,26 @@ class QQAgentlyMailPlugin(Star):
     async def _start_login(self, event: AstrMessageEvent, account: str) -> str | None:
         """发起设备流登录并把扫码通知发到会话，返回错误文本或 None。"""
         umo = event.unified_msg_origin
+        logger.info(f"[agently] 登录发起：账号={account}")
         if not await self._registry.start(umo, LOGIN_FLOW_TTL_SECONDS):
+            logger.warning(f"[agently] 登录发起拒绝：账号={account}，原因=已有登录在途")
             return "该会话已有登录在途，请等待结果推送或过期后再试。"
         _, oauth = self._clients_for(account)
         try:
             flow = await oauth.start()
         except OAuthError as exc:
             await self._registry.finish(umo)
+            logger.warning(
+                f"[agently] 登录发起失败：账号={account}，异常=OAuthError，代码={exc.code}"
+            )
             return f"登录发起失败：{exc.message}"
         except Exception as exc:
             await self._registry.finish(umo)
             logger.exception(f"账号 {account} 发起设备流失败")
             return f"登录发起失败：{exc}"
-
+        logger.debug(
+            f"[agently] 设备流初始化完成：账号={account}，有效期={flow.expires_in:.0f}秒"
+        )
         deadline = time.monotonic() + flow.expires_in
         headless: HeadlessQRLogin | None = None
         qr_session: HeadlessQRSession | None = None
@@ -245,7 +269,7 @@ class QQAgentlyMailPlugin(Star):
             qr_session = await headless.create_qr_session(deadline=deadline)
         except HeadlessQRLoginError as exc:
             logger.warning(
-                f"账号 {account} 无头二维码创建失败，降级发送浏览器链接：{exc}"
+                f"[agently] 无头二维码创建失败，降级浏览器授权：账号={account}，代码={exc.code}"
             )
             if headless is not None:
                 await self._close_headless(account, headless)
@@ -287,7 +311,8 @@ class QQAgentlyMailPlugin(Star):
         except Exception as exc:
             if qr_session is not None and headless is not None:
                 logger.warning(
-                    f"账号 {account} 二维码发送失败，改发浏览器链接：{exc}"
+                    f"[agently] 二维码通知发送失败，改发浏览器授权通知：账号={account}，"
+                    f"异常={type(exc).__name__}"
                 )
                 await self._close_headless(account, headless)
                 headless = None
@@ -316,6 +341,10 @@ class QQAgentlyMailPlugin(Star):
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        logger.info(
+            f"[agently] 登录通知已发送并启动后台授权：账号={account}，"
+            f"扫码模式={'二维码' if qr_session is not None else '浏览器'}"
+        )
         return None
 
     async def _send_login_notice_with_qr(
@@ -355,6 +384,10 @@ class QQAgentlyMailPlugin(Star):
         """后台完成无头二维码和设备流授权，完成后向发起会话回推结果。"""
         umo = event.unified_msg_origin
         client, oauth = self._clients_for(account)
+        logger.debug(
+            f"[agently] 后台授权开始：账号={account}，"
+            f"扫码模式={'浏览器' if headless is None else '二维码'}"
+        )
         try:
             if headless is None:
                 bundle = await oauth.poll(flow, deadline=deadline)
@@ -391,25 +424,35 @@ class QQAgentlyMailPlugin(Star):
                     deadline=deadline,
                 )
                 bundle = await oauth.poll(flow, deadline=deadline)
+        except asyncio.CancelledError:
+            logger.debug(f"[agently] 后台授权已取消：账号={account}")
+            raise
         except HeadlessQRLoginError as exc:
+            logger.warning(
+                f"[agently] 无头登录失败：账号={account}，代码={exc.code}"
+            )
             await self._push(
                 umo,
                 f"账号 {account} 登录失败：{self._headless_error_message(exc)}",
             )
         except AccessDeniedError as exc:
+            logger.warning(f"[agently] 用户拒绝设备授权：账号={account}")
             await self._push(umo, f"账号 {account} 登录失败：{exc.message}。")
         except ExpiredTokenError as exc:
+            logger.warning(f"[agently] 设备授权已过期：账号={account}")
             await self._push(
                 umo,
                 f"账号 {account} 登录失败：{exc.message}，"
                 "二维码有效期约 2-3 分钟，请重新执行 /agently login。",
             )
         except AuthorizationPendingError as exc:
+            logger.warning(f"[agently] 设备授权等待超时：账号={account}")
             await self._push(
                 umo,
                 f"账号 {account} 登录超时：{exc.message}，请重新执行 /agently login。",
             )
         except OAuthError as exc:
+            logger.warning(f"[agently] OAuth 授权失败：账号={account}，代码={exc.code}")
             await self._push(umo, f"账号 {account} 登录失败：{exc.message}。")
         except Exception as exc:
             logger.exception(f"账号 {account} 的设备流轮询异常")
@@ -418,6 +461,7 @@ class QQAgentlyMailPlugin(Star):
                 f"账号 {account} 登录失败：发生未预期的错误（{exc}），详情见插件日志。",
             )
         else:
+            logger.info(f"[agently] 登录授权完成，开始收尾绑定：账号={account}")
             try:
                 await self._announce_login_success(umo, account, bundle, client)
             except Exception:
@@ -428,6 +472,7 @@ class QQAgentlyMailPlugin(Star):
                     "请执行 /agently status 检查。",
                 )
         finally:
+            logger.debug(f"[agently] 后台授权进入清理：账号={account}")
             if headless is not None:
                 await self._close_headless(account, headless)
             await self._registry.finish(umo)
@@ -537,10 +582,14 @@ class QQAgentlyMailPlugin(Star):
                 return
         bindings[umo] = account
         await self._save_bindings(bindings)
+        logger.info(f"[agently] 登录成功并绑定会话：账号={account}")
         try:
             me = await client.me()
         except ClientError as exc:
-            logger.warning(f"账号 {account} 登录成功但读取邮箱信息失败: {exc}")
+            logger.warning(
+                f"[agently] 登录成功但读取邮箱信息失败：账号={account}，"
+                f"代码={exc.code}，状态码={exc.status_code}"
+            )
             await self._push(
                 umo,
                 f"账号 {account} 登录成功：app_id {bundle.app_id or '未知'}，"
@@ -550,6 +599,9 @@ class QQAgentlyMailPlugin(Star):
             return
         self._me_cache[account] = me
         limits = json.dumps(me.rate_limits.values, ensure_ascii=False)
+        logger.debug(
+            f"[agently] 登录后邮箱信息已缓存：账号={account}，地址数量={len(me.aliases)}"
+        )
         email = self._primary_email(me)
         await self._push(
             umo,
@@ -598,6 +650,7 @@ class QQAgentlyMailPlugin(Star):
 
     async def _remove_account(self, account: str) -> tuple[bool, int, str | None]:
         """先清理监听，再删除凭证和绑定，并返回明确清理错误。"""
+        logger.debug(f"[agently] 账号登出开始：账号={account}")
         cleanup_errors = await self._stop_watches_for_account(account)
         if cleanup_errors:
             return (
@@ -606,6 +659,7 @@ class QQAgentlyMailPlugin(Star):
                 f"账号 {account} 登出失败：{'；'.join(cleanup_errors)}",
             )
 
+        logger.debug(f"[agently] 账号监听清理完成：账号={account}")
         if not await self._token_store.delete(account):
             return False, 0, None
         self._clients.pop(account, None)
@@ -619,7 +673,11 @@ class QQAgentlyMailPlugin(Star):
         for bound_umo in referenced:
             del bindings[bound_umo]
         await self._save_bindings(bindings)
+        logger.info(
+            f"[agently] 账号登出完成：账号={account}，解除绑定数量={len(referenced)}"
+        )
         return True, len(referenced), None
+
     async def _account_snapshot(self, umo: str) -> dict:
         """枚举账号凭证与当前会话的绑定状态，供命令与工具共用。"""
         accounts = await self._token_store.list_accounts()
@@ -654,15 +712,24 @@ class QQAgentlyMailPlugin(Star):
         """在监听锁内读取原始配置，根数据损坏时返回 None。"""
         configs = await self.get_kv_data(WATCH_CONFIG_KEY, {})
         if configs is None:
-            return {}
+            configs = {}
         if not isinstance(configs, dict):
             logger.error("新邮件监听配置根数据不是对象，未修改原数据")
             return None
+        logger.debug(
+            f"[agently] 监听配置读取完成：键={WATCH_CONFIG_KEY}，数量={len(configs)}"
+        )
         return dict(configs)
 
     async def _write_watch_configs_locked(self, configs: dict[str, Any]) -> None:
         """在监听锁内写回配置，并保留其他会话的原始记录。"""
+        logger.debug(
+            f"[agently] 监听配置保存开始：键={WATCH_CONFIG_KEY}，数量={len(configs)}"
+        )
         await self.put_kv_data(WATCH_CONFIG_KEY, configs)
+        logger.debug(
+            f"[agently] 监听配置保存完成：键={WATCH_CONFIG_KEY}，数量={len(configs)}"
+        )
 
     def _validate_watch_config(self, umo: Any, config: Any) -> dict[str, Any] | None:
         """校验并规范化一条监听配置，坏记录返回 None。"""
@@ -684,15 +751,15 @@ class QQAgentlyMailPlugin(Star):
             if not isinstance(value, str) or not value.strip():
                 logger.error(
                     f"会话 {umo} 的监听配置字段 {field} 无效: {value!r}；"
-                    f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+                    f"账号={config['account']!r}，地址ID={config['alias_id']!r}"
                 )
                 return None
 
         cursor = config["next_cursor"]
         if cursor is not None and not isinstance(cursor, str):
             logger.error(
-                f"会话 {umo} 的监听配置字段 next_cursor 无效: {cursor!r}；"
-                f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+                f"会话 {umo} 的监听配置字段 next_cursor 类型无效；"
+                f"账号={config['account']!r}，地址ID={config['alias_id']!r}"
             )
             return None
 
@@ -702,7 +769,7 @@ class QQAgentlyMailPlugin(Star):
         ):
             logger.error(
                 f"会话 {umo} 的监听配置字段 seen_message_ids 无效；"
-                f"account={config['account']!r}, alias_id={config['alias_id']!r}"
+                f"账号={config['account']!r}，地址ID={config['alias_id']!r}"
             )
             return None
 
@@ -740,6 +807,10 @@ class QQAgentlyMailPlugin(Star):
         seen_message_ids: list[str],
     ) -> None:
         """只保存仍属于当前监听代次和账号地址的候选状态。"""
+        logger.debug(
+            f"[agently] 监听状态保存候选：账号={account}，地址ID={alias_id}，"
+            f"游标存在={next_cursor is not None}，去重数量={len(seen_message_ids)}"
+        )
         async with self._watch_config_lock:
             configs = await self._read_watch_configs_locked()
             if configs is None:
@@ -772,6 +843,10 @@ class QQAgentlyMailPlugin(Star):
                 raise ValueError(f"会话 {umo} 的候选监听状态无效")
             configs[umo] = candidate
             await self._write_watch_configs_locked(configs)
+            logger.debug(
+                f"[agently] 监听状态保存完成：账号={account}，地址ID={alias_id}，"
+                f"游标存在={next_cursor is not None}，去重数量={len(seen_message_ids)}"
+            )
 
     @staticmethod
     def _new_watch_id() -> str:
@@ -797,25 +872,41 @@ class QQAgentlyMailPlugin(Star):
         alias_id: str | None = None,
     ) -> str | None:
         """校验账号地址并启动持久化监听，返回错误文本或 None。"""
+        logger.debug(
+            f"[agently] 监听启动请求：账号={account}，地址ID={alias_id}"
+        )
         try:
             bundle = await self._token_store.load(account)
         except TokenStoreError as exc:
+            logger.warning(
+                f"[agently] 监听启动读取凭证失败：账号={account}，异常={type(exc).__name__}"
+            )
             return f"读取账号 {account} 凭证失败：{exc}"
         if bundle is None:
+            logger.warning(f"[agently] 监听启动失败：账号={account}，原因=凭证不存在")
             return f"账号 {account} 没有已保存的凭证，请先登录。"
 
         client, _ = self._clients_for(account)
         try:
             me = await client.me()
         except (ClientError, OAuthError, TokenStoreError) as exc:
+            logger.warning(
+                f"[agently] 监听启动读取地址失败：账号={account}，异常={type(exc).__name__}"
+            )
             return f"读取账号 {account} 的邮箱地址失败：{exc}"
 
         selected_alias = self._select_watch_alias(me, alias_id)
         if selected_alias is None:
+            logger.warning(
+                f"[agently] 监听启动地址解析失败：账号={account}，地址ID={alias_id}"
+            )
             if alias_id is None:
                 return "/v1/me 未返回 is_primary 别名"
             return "邮箱地址不存在或不属于该账号"
 
+        logger.debug(
+            f"[agently] 监听地址解析完成：账号={account}，地址ID={selected_alias}"
+        )
         async with self._watch_config_lock:
             entry = self._watch_tasks.get(umo)
             if entry is not None:
@@ -841,6 +932,10 @@ class QQAgentlyMailPlugin(Star):
                     return "当前会话已有其他账号或地址的监听配置，请先执行 watch_stop。"
                 next_cursor = current["next_cursor"]
                 seen_message_ids = current["seen_message_ids"]
+                logger.debug(
+                    f"[agently] 监听恢复持久化进度：账号={account}，地址ID={selected_alias}，"
+                    f"游标存在={next_cursor is not None}，去重数量={len(seen_message_ids)}"
+                )
 
             watch_id = self._new_watch_id()
             configs[umo] = {
@@ -910,6 +1005,10 @@ class QQAgentlyMailPlugin(Star):
                     self._discard_watch(_umo, _task, _watch_id)
                 )
             )
+        logger.info(
+            f"[agently] 新邮件监听已启动：账号={account}，地址ID={selected_alias}，"
+            f"游标存在={next_cursor is not None}，去重数量={len(seen_message_ids)}"
+        )
         return None
 
     async def _restore_watches(self) -> None:
@@ -917,15 +1016,22 @@ class QQAgentlyMailPlugin(Star):
         async with self._watch_config_lock:
             configs = await self._read_watch_configs_locked()
         if configs is None:
+            logger.warning("[agently] 监听恢复跳过：持久化配置根数据损坏")
             return
 
+        restored = 0
+        failed = 0
+        skipped = 0
         bindings = await self._load_bindings()
+        logger.debug(f"[agently] 监听恢复开始：配置数量={len(configs)}")
         for umo, raw_config in configs.items():
             config = self._validate_watch_config(umo, raw_config)
             if config is None:
+                skipped += 1
                 continue
             bound_account = bindings.get(umo)
             if not isinstance(bound_account, str) or not bound_account:
+                skipped += 1
                 logger.warning(
                     f"会话 {umo} 没有账号绑定，保留账号 {config['account']} 的监听配置"
                 )
@@ -937,10 +1043,18 @@ class QQAgentlyMailPlugin(Star):
                     config["alias_id"],
                 )
             except Exception:
+                failed += 1
                 logger.exception(f"恢复会话 {umo} 的新邮件监听失败，配置已保留")
                 continue
             if error is not None:
+                failed += 1
                 logger.warning(f"恢复会话 {umo} 的新邮件监听失败：{error}；配置已保留")
+                continue
+            restored += 1
+        logger.info(
+            f"[agently] 监听恢复完成：配置数量={len(configs)}，恢复数量={restored}，"
+            f"失败数量={failed}，跳过数量={skipped}"
+        )
 
     async def _stop_watch(self, umo: str) -> tuple[bool, str | None]:
         """取消任务并删除持久化配置，返回是否发现监听及清理错误。"""
@@ -948,12 +1062,16 @@ class QQAgentlyMailPlugin(Star):
         found = False
         error = None
 
+        logger.debug("[agently] 监听停止请求")
         async with self._watch_config_lock:
             entry = self._watch_tasks.pop(umo, None)
             if entry is not None:
                 found = True
                 task = entry.task
                 task.cancel()
+                logger.debug(
+                    f"[agently] 监听任务已请求取消：账号={entry.account}，地址ID={entry.alias_id}"
+                )
 
             try:
                 configs = await self._read_watch_configs_locked()
@@ -974,6 +1092,10 @@ class QQAgentlyMailPlugin(Star):
 
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        if found and error is None:
+            logger.info("[agently] 新邮件监听已停止")
+        else:
+            logger.debug(f"[agently] 监听停止结束：发现监听={found}，存在错误={error is not None}")
         return found, error
 
     def _discard_watch(self, umo: str, task: asyncio.Task, watch_id: str) -> None:
@@ -985,6 +1107,8 @@ class QQAgentlyMailPlugin(Star):
             and entry.watch_id == watch_id
         ):
             del self._watch_tasks[umo]
+            logger.debug("[agently] 监听任务登记已清理")
+
     async def _watch_loop(
         self,
         umo: str,
@@ -995,31 +1119,53 @@ class QQAgentlyMailPlugin(Star):
     ) -> None:
         """持续推送新邮件，网络或凭证失败时退避重连。"""
         reconnect_delay = 5.0
+        logger.debug(
+            f"[agently] 监听循环开始：账号={account}，地址ID={alias_id}，代次={watch_id}"
+        )
         try:
             while True:
                 try:
                     async for message in watcher.watch():
+                        logger.debug(
+                            f"[agently] 新邮件事件推送开始：账号={account}，地址ID={alias_id}，"
+                            f"邮件ID={message.message_id}"
+                        )
                         pushed = await self._push(umo, format_new_mail_notice(message))
                         if not pushed:
                             raise RuntimeError("新邮件推送失败，当前事件尚未确认")
+                        logger.debug(
+                            f"[agently] 新邮件事件推送完成：账号={account}，"
+                            f"邮件ID={message.message_id}"
+                        )
                         reconnect_delay = 5.0
                 except (ClientError, OAuthError, TokenStoreError) as exc:
                     logger.warning(
-                        f"账号 {account} 地址 {alias_id} 的监听 {watch_id} 连接失败：{exc}；"
-                        f"{reconnect_delay:g} 秒后重连"
+                        f"[agently] 监听连接失败，准备重连：账号={account}，地址ID={alias_id}，"
+                        f"代次={watch_id}，异常={type(exc).__name__}，"
+                        f"代码={getattr(exc, 'code', None)}，"
+                        f"状态码={getattr(exc, 'status_code', None)}，"
+                        f"重连延迟={reconnect_delay:g}秒"
                     )
                     await asyncio.sleep(reconnect_delay)
                     reconnect_delay = min(reconnect_delay * 2, 60.0)
+                    logger.debug(
+                        f"[agently] 监听重连退避更新：账号={account}，"
+                        f"下次延迟={reconnect_delay:g}秒"
+                    )
         except asyncio.CancelledError:
+            logger.debug(
+                f"[agently] 监听循环已取消：账号={account}，地址ID={alias_id}，代次={watch_id}"
+            )
             raise
         except Exception as exc:
             logger.exception(
-                f"账号 {account} 地址 {alias_id} 的监听 {watch_id} 已停止"
+                f"[agently] 监听循环异常停止：账号={account}，地址ID={alias_id}，代次={watch_id}"
             )
             await self._push(
                 umo,
                 f"账号 {account} 地址 {alias_id} 的新邮件监听已停止：{exc}",
             )
+
     async def _record_send(self, account: str) -> None:
         """把账号的本地发送计数加一，跨日自动重置。"""
         async with self._send_counter_lock:
@@ -1035,17 +1181,35 @@ class QQAgentlyMailPlugin(Star):
             else:
                 count = 1
             counters[account] = {"date": today, "count": count}
+            logger.debug(
+                f"[agently] 发送计数保存开始：账号={account}，日期={today}，计数={count}"
+            )
             await self.put_kv_data(SEND_COUNTER_KEY, counters)
+            logger.debug(
+                f"[agently] 发送计数保存完成：账号={account}，日期={today}，计数={count}"
+            )
 
     async def _send_count_today(self, account: str) -> int:
         """读取账号今日的本地发送计数。"""
         async with self._send_counter_lock:
             counters = await self.get_kv_data(SEND_COUNTER_KEY, {}) or {}
             entry = counters.get(account)
-            if not isinstance(entry, dict) or entry.get("date") != time.strftime("%Y-%m-%d"):
-                return 0
-            count = entry.get("count")
-            return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+            today = time.strftime("%Y-%m-%d")
+            if not isinstance(entry, dict) or entry.get("date") != today:
+                count = 0
+            else:
+                raw_count = entry.get("count")
+                count = (
+                    raw_count
+                    if isinstance(raw_count, int)
+                    and not isinstance(raw_count, bool)
+                    and raw_count >= 0
+                    else 0
+                )
+            logger.debug(
+                f"[agently] 发送计数读取完成：账号={account}，日期={today}，计数={count}"
+            )
+            return count
 
     @staticmethod
     def _primary_email(me: Me | None) -> str:
@@ -1061,17 +1225,23 @@ class QQAgentlyMailPlugin(Star):
 
     async def _load_bindings(self) -> dict[str, str]:
         """读取会话到账号的绑定表。"""
-        return await self.get_kv_data(BINDINGS_KEY, {}) or {}
+        bindings = await self.get_kv_data(BINDINGS_KEY, {}) or {}
+        logger.debug(f"[agently] 绑定表读取完成：键={BINDINGS_KEY}，数量={len(bindings)}")
+        return bindings
 
     async def _save_bindings(self, bindings: dict[str, str]) -> None:
         """整体写回会话到账号的绑定表。"""
+        logger.debug(f"[agently] 绑定表保存开始：键={BINDINGS_KEY}，数量={len(bindings)}")
         await self.put_kv_data(BINDINGS_KEY, bindings)
+        logger.debug(f"[agently] 绑定表保存完成：键={BINDINGS_KEY}，数量={len(bindings)}")
 
     async def _push(self, umo: str, text: str) -> bool:
         """向指定会话主动推送文本，并返回是否发送成功。"""
+        logger.debug(f"[agently] 会话推送开始：会话={umo}")
         try:
             await self.context.send_message(umo, MessageChain().message(text))
         except Exception:
             logger.exception(f"向会话 {umo} 推送消息失败")
             return False
+        logger.debug(f"[agently] 会话推送完成：会话={umo}")
         return True

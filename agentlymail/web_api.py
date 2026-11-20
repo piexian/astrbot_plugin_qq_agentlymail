@@ -90,7 +90,10 @@ def _client_error_response(exc: ClientError):
         )
     if status == 403:
         return error_response(str(exc), status_code=403)
-    logger.warning(f"Web API 上游错误: {exc}")
+    logger.warning(
+        f"[agently] Web API 上游错误：异常={type(exc).__name__}，"
+        f"代码={exc.code}，状态码={exc.status_code}"
+    )
     return error_response("上游服务错误，请稍后重试。", status_code=502)
 
 
@@ -99,23 +102,53 @@ def _guarded(handler: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[
 
     @functools.wraps(handler)
     async def wrapper(self: MailWebApi, *args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        name = handler.__name__
+        method = request.method
+        path = request.path
+        logger.debug(f"[agently] Web 请求开始：处理器={name}，方法={method}，路径={path}")
         try:
-            return await handler(self, *args, **kwargs)
+            response = await handler(self, *args, **kwargs)
         except WebApiError as exc:
+            logger.warning(
+                f"[agently] Web 请求失败：处理器={name}，方法={method}，路径={path}，"
+                f"异常={type(exc).__name__}，状态码={exc.status_code}，"
+                f"耗时={time.perf_counter() - started:.3f}秒"
+            )
             return error_response(exc.message, status_code=exc.status_code, data=exc.data)
         except ClientError as exc:
+            logger.debug(
+                f"[agently] Web 上游调用失败：处理器={name}，方法={method}，路径={path}，"
+                f"代码={exc.code}，状态码={exc.status_code}，"
+                f"耗时={time.perf_counter() - started:.3f}秒"
+            )
             return _client_error_response(exc)
         except OAuthError as exc:
-            logger.warning(f"Web API 凭证错误: {exc}")
+            logger.warning(
+                f"[agently] Web 凭证错误：处理器={name}，方法={method}，路径={path}，"
+                f"代码={exc.code}，耗时={time.perf_counter() - started:.3f}秒"
+            )
             return error_response(
                 "凭证失效，请在聊天中重新执行 /agently login。", status_code=401
             )
         except TokenStoreError:
-            logger.exception("Web API 凭证存储错误")
+            logger.exception(
+                f"[agently] Web 凭证存储错误：处理器={name}，方法={method}，路径={path}，"
+                f"耗时={time.perf_counter() - started:.3f}秒"
+            )
             return error_response("凭证存储错误，详情见插件日志。", status_code=500)
         except Exception:
-            logger.exception("Web API 未预期错误")
+            logger.exception(
+                f"[agently] Web 未预期错误：处理器={name}，方法={method}，路径={path}，"
+                f"耗时={time.perf_counter() - started:.3f}秒"
+            )
             return error_response("插件内部错误，详情见插件日志。", status_code=500)
+        logger.debug(
+            f"[agently] Web 请求成功：处理器={name}，方法={method}，路径={path}，"
+            f"状态码={getattr(response, 'status', None)}，"
+            f"耗时={time.perf_counter() - started:.3f}秒"
+        )
+        return response
 
     return wrapper
 
@@ -243,15 +276,17 @@ def _sweep_downloads(root: Path) -> None:
     if not root.is_dir():
         return
     cutoff = time.time() - DOWNLOAD_TTL_SECONDS
+    removed = 0
     for child in root.iterdir():
         if not child.is_dir() or not _UUID_DIR_PATTERN.match(child.name):
             continue
         try:
             if child.stat().st_mtime < cutoff:
                 shutil.rmtree(child)
+                removed += 1
         except OSError:
             logger.warning(f"清理过期下载目录失败: {child}")
-
+    logger.debug(f"[agently] 下载暂存清理完成：根目录={root}，删除数量={removed}")
 
 async def _read_json_body() -> dict[str, Any]:
     """读取并解析 JSON 请求体，先按原始字节判长。"""
@@ -374,6 +409,7 @@ class MailWebApi:
     async def cleanup(self) -> None:
         """插件卸载时清理专用下载目录。"""
         root = self._download_root()
+        logger.debug(f"[agently] 下载目录清理开始：根目录={root}")
 
         def _remove() -> None:
             if root.is_dir():
@@ -383,15 +419,19 @@ class MailWebApi:
             await asyncio.to_thread(_remove)
         except OSError:
             logger.warning(f"清理下载目录失败: {root}")
+            return
+        logger.debug(f"[agently] 下载目录清理完成：根目录={root}")
 
     def _stage_download(self, content: bytes, filename: str) -> Path:
         """把附件字节写入专用临时目录，返回文件路径。"""
         root = self._download_root()
+        logger.debug(f"[agently] 下载暂存开始：根目录={root}，字节数={len(content)}")
         _sweep_downloads(root)
         subdir = root / uuid.uuid4().hex
         subdir.mkdir(parents=True, exist_ok=True)
         path = subdir / filename
         path.write_bytes(content)
+        logger.debug(f"[agently] 下载暂存完成：目录={subdir}，字节数={len(content)}")
         return path
 
     async def _resolve_account(
@@ -422,6 +462,7 @@ class MailWebApi:
         except Exception:
             logger.exception(f"账号 {account} 远端发送成功但本地发送计数失败")
             return False
+        logger.debug(f"[agently] Web 发送计数保存完成：账号={account}")
         return True
 
     async def _refresh_me_after_write(
@@ -431,16 +472,28 @@ class MailWebApi:
         try:
             me = await _timed(client.me(), READ_TIMEOUT)
         except OAuthError as exc:
-            logger.warning(f"账号 {account} 写成功后凭证失效，刷新身份失败: {exc}")
+            logger.warning(
+                f"[agently] 写成功后身份刷新失败：账号={account}，异常={type(exc).__name__}，"
+                f"代码={exc.code}"
+            )
             return None, "凭证失效，请在聊天中重新执行 /agently login。"
         except ClientError as exc:
-            logger.warning(f"账号 {account} 写成功后刷新身份失败: {exc}")
+            logger.warning(
+                f"[agently] 写成功后身份刷新失败：账号={account}，异常=ClientError，"
+                f"代码={exc.code}，状态码={exc.status_code}"
+            )
             if exc.status_code == 401:
                 return None, "凭证失效，请在聊天中重新执行 /agently login。"
             return None, "刷新邮箱信息失败，请稍后重试。"
         except WebApiError as exc:
+            logger.debug(
+                f"[agently] 写成功后身份刷新超时降级：账号={account}，状态码={exc.status_code}"
+            )
             return None, exc.message
         self._plugin._me_cache[account] = me
+        logger.debug(
+            f"[agently] 写成功后身份刷新完成：账号={account}，地址数量={len(me.aliases)}"
+        )
         return me, None
 
     async def _account_view(self, account: str) -> dict[str, Any]:
@@ -514,7 +567,10 @@ class MailWebApi:
                 "nickname": info.get("nickname"),
                 "agent_alias_limit": info.get("agent_alias_limit"),
             }
-        except (ClientError, OAuthError, WebApiError):
+        except (ClientError, OAuthError, WebApiError) as exc:
+            logger.debug(
+                f"[agently] 账号附加信息读取降级：账号={account}，异常={type(exc).__name__}"
+            )
             account_info = None
         return json_response(
             {
@@ -657,6 +713,10 @@ class MailWebApi:
         message_id = _body_str(payload, "message_id")
         _validate_identifier(message_id, "message_id")
         await _timed(client.trash(message_id, alias_id=alias_id), WRITE_TIMEOUT, write=True)
+        logger.info(
+            f"[agently] Web 邮件已移入垃圾箱：账号={account}，地址ID={alias_id}，"
+            f"邮件ID={message_id}"
+        )
         return json_response({"message_id": message_id, "trashed": True})
 
     @_guarded
@@ -695,6 +755,11 @@ class MailWebApi:
             write=True,
         )
         local_count_recorded = await self._record_send_safe(account)
+        logger.info(
+            f"[agently] Web 邮件发送成功：账号={account}，地址ID={alias_id}，"
+            f"收件人数量={len(to)}，抄送数量={len(cc)}，密送数量={len(bcc)}，"
+            f"附件数量={len(attachments)}，本地计数已保存={local_count_recorded}"
+        )
         return json_response(
             {
                 "queued": True,
@@ -740,6 +805,11 @@ class MailWebApi:
             write=True,
         )
         local_count_recorded = await self._record_send_safe(account)
+        logger.info(
+            f"[agently] Web 邮件回复成功：账号={account}，地址ID={alias_id}，"
+            f"邮件ID={message_id}，回复全部={reply_all}，"
+            f"本地计数已保存={local_count_recorded}"
+        )
         return json_response(
             {
                 "queued": True,
@@ -781,6 +851,11 @@ class MailWebApi:
             write=True,
         )
         local_count_recorded = await self._record_send_safe(account)
+        logger.info(
+            f"[agently] Web 邮件转发成功：账号={account}，地址ID={alias_id}，"
+            f"邮件ID={message_id}，收件人数量={len(to)}，包含附件={include_attachments}，"
+            f"本地计数已保存={local_count_recorded}"
+        )
         return json_response(
             {
                 "queued": True,
@@ -800,6 +875,10 @@ class MailWebApi:
         result = await _timed(client.create_address(), WRITE_TIMEOUT, write=True)
         alias_id = result.get("alias_id")
         me, refresh_error = await self._refresh_me_after_write(account, client)
+        logger.info(
+            f"[agently] Web 邮箱地址创建成功：账号={account}，地址ID={alias_id}，"
+            f"是否复用={bool(result.get('is_reused', False))}，刷新降级={me is None}"
+        )
         aliases = [_alias_dict(a) for a in me.aliases] if me is not None else None
         alias = None
         if me is not None:
@@ -833,6 +912,10 @@ class MailWebApi:
         if client._alias_id == alias_id:
             client._alias_id = None
         me, refresh_error = await self._refresh_me_after_write(account, client)
+        logger.info(
+            f"[agently] Web 邮箱地址注销成功：账号={account}，地址ID={alias_id}，"
+            f"刷新降级={me is None}"
+        )
         aliases = [_alias_dict(a) for a in me.aliases] if me is not None else None
         return json_response(
             {
@@ -863,4 +946,5 @@ def register_web_apis(plugin: QQAgentlyMailPlugin) -> MailWebApi:
     ]
     for method, name, handler, desc in routes:
         plugin.context.register_web_api(f"{ROUTE_PREFIX}/{name}", handler, [method], desc)
+    logger.info(f"[agently] Web API 路由注册完成：数量={len(routes)}")
     return api
