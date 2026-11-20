@@ -738,17 +738,21 @@ class AgentlyMailSendTool(FunctionTool):
 
 @dataclass
 class AgentlyMailAdminTool(FunctionTool):
-    """LLM 工具：管理员管理账号登录与邮件删除。"""
+    """LLM 工具：管理员管理账号登录、邮件删除与邮箱地址。"""
 
     def __init__(self, plugin: QQAgentlyMailPlugin):
         super().__init__(
             name="agently_mail_admin",
             description=(
-                "管理员专用：管理 QQ Agently Mail 账号与邮件删除。"
+                "管理员专用：管理 QQ Agently Mail 账号、邮件删除与邮箱地址。"
                 "action=login 发起微信扫码登录，二维码、链接和验证码会发到本会话；多邮箱账号会要求回复编号；"
                 "logout 删除账号凭证并解绑；status 列出账号与当前会话绑定；"
                 "trash 把邮件移入垃圾箱；empty_trash 清空垃圾箱；"
-                "permanent_delete 永久删除邮件。"
+                "permanent_delete 永久删除邮件；"
+                "addresses 列出全部邮箱地址、昵称与别名配额；"
+                "create_address 新建邮箱地址，前缀由服务端派生，不可指定；"
+                "delete_address 注销邮箱地址：不可恢复、邮件全删、已绑定 Agent 自动解绑，"
+                "90 天保留期内新建地址会复用旧地址，执行前必须向用户确认。"
             ),
             parameters=object_parameters(
                 {
@@ -761,10 +765,14 @@ class AgentlyMailAdminTool(FunctionTool):
                             "trash",
                             "empty_trash",
                             "permanent_delete",
+                            "addresses",
+                            "create_address",
+                            "delete_address",
                         ],
                     ),
                     "account": string_param("login/logout 的账号名，默认 default", default="default"),
                     "message_id": string_param("trash/permanent_delete 的邮件 ID"),
+                    "alias_id": string_param("delete_address 要注销的地址 ID，可先用 addresses 查看"),
                 },
                 required=["action"],
             ),
@@ -777,6 +785,9 @@ class AgentlyMailAdminTool(FunctionTool):
             "trash": self._trash,
             "empty_trash": self._empty_trash,
             "permanent_delete": self._permanent_delete,
+            "addresses": self._addresses,
+            "create_address": self._create_address,
+            "delete_address": self._delete_address,
         }
 
     async def call(
@@ -898,6 +909,80 @@ class AgentlyMailAdminTool(FunctionTool):
             }
         )
 
+    async def _addresses(
+        self,
+        event: AstrMessageEvent,
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
+        account, failure = await _resolve_account(self._plugin, event)
+        if failure is not None:
+            return failure
+        client, _ = self._plugin._clients_for(account)
+        me = await client.me()
+        account_info = await client.get_account()
+        return ok_result(
+            {
+                "account": account,
+                "nickname": account_info.get("nickname"),
+                "agent_alias_limit": account_info.get("agent_alias_limit"),
+                "aliases": [
+                    {
+                        "alias_id": alias.alias_id,
+                        "email": alias.email,
+                        "is_primary": alias.is_primary,
+                    }
+                    for alias in me.aliases
+                ],
+            }
+        )
+
+    async def _create_address(
+        self,
+        event: AstrMessageEvent,
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
+        account, failure = await _resolve_account(self._plugin, event)
+        if failure is not None:
+            return failure
+        client, _ = self._plugin._clients_for(account)
+        created = await client.create_address()
+        return ok_result(
+            {
+                "account": account,
+                **created,
+                "message": (
+                    "已创建并绑定新邮箱地址。前缀由服务端派生，无法指定；"
+                    "is_reused 为 true 表示复用了 90 天注销保留期内的旧地址。"
+                ),
+            }
+        )
+
+    async def _delete_address(
+        self,
+        event: AstrMessageEvent,
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
+        account, failure = await _resolve_account(self._plugin, event)
+        if failure is not None:
+            return failure
+        alias_id = _required_text(kwargs, "alias_id")
+        if alias_id is None:
+            return error_result(
+                "缺少 alias_id 参数",
+                "可先用 action=addresses 查看要注销地址的 alias_id。",
+            )
+        client, _ = self._plugin._clients_for(account)
+        await client.delete_address(alias_id)
+        return ok_result(
+            {
+                "account": account,
+                "alias_id": alias_id,
+                "message": (
+                    "已注销邮箱地址：邮件全部删除，已绑定的 Agent 自动解绑，不可恢复；"
+                    "90 天保留期内新建地址将复用该地址。"
+                ),
+            }
+        )
 
 
 def make_tools(plugin: QQAgentlyMailPlugin) -> list[FunctionTool]:

@@ -210,3 +210,6 @@ __marimo__/
 plan/
 artifacts/
 .ccg/
+
+# AstrBot 运行时数据（离线验证导入 astrbot 时生成）
+data/

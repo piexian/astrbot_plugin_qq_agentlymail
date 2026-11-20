@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import secrets
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -23,6 +24,10 @@ from .models import (
 )
 from .oauth import OAuthClient
 from .token_store import TokenStore
+
+# 别名管理端点在 agent.qq.com 主站，直接认 OAuth Bearer，不走 API 子域。
+MGR_URL = "https://agent.qq.com/agent/mgr"
+GETACCOUNT_URL = "https://agent.qq.com/agent/getaccount"
 
 
 class ClientError(RuntimeError):
@@ -360,6 +365,36 @@ class AgentlyMailClient:
             await self._raise_response(response, "下载附件")
         return response.content
 
+    async def get_account(self) -> Mapping[str, Any]:
+        """通过 getaccount 读取账号昵称与别名配额。"""
+        return await self._mgr_post(GETACCOUNT_URL, {}, "读取账号信息")
+
+    async def create_address(self) -> Mapping[str, Any]:
+        """新建邮箱地址：func=7 派生前缀后立即 func=2 确认绑定。"""
+        created = await self._mgr_post(MGR_URL, {"func": "7"}, "创建邮箱地址")
+        alias = created.get("alias")
+        if not isinstance(alias, str) or not alias:
+            raise ClientError("创建邮箱地址响应缺少 alias", details=created)
+        bound = await self._mgr_post(
+            MGR_URL, {"func": "2", "new_alias": alias}, "绑定邮箱地址"
+        )
+        alias_id = bound.get("alias_id")
+        if not isinstance(alias_id, str) or not alias_id:
+            raise ClientError("绑定邮箱地址响应缺少 alias_id", details=bound)
+        return {
+            "alias": alias,
+            "alias_id": alias_id,
+            "is_reused": created.get("is_reused", False),
+        }
+
+    async def delete_address(self, alias_id: str) -> Mapping[str, Any]:
+        """注销指定邮箱地址，注销不可恢复且地址保留 90 天供复用。"""
+        self._require_identifier(alias_id, "alias_id")
+        await self._mgr_post(
+            MGR_URL, {"func": "3", "alias_id": alias_id}, "注销邮箱地址"
+        )
+        return {"alias_id": alias_id}
+
     async def _delete_message(
         self,
         message_id: str,
@@ -407,6 +442,48 @@ class AgentlyMailClient:
         if second.is_error:
             await self._raise_response(second, operation, second_payload)
         return self._unwrap_data(second_payload)
+
+    async def _mgr_post(
+        self,
+        url: str,
+        params: Mapping[str, str],
+        operation: str,
+    ) -> Mapping[str, Any]:
+        """向 agent.qq.com 管理端点发表单请求，校验 head.ret 后返回 body。"""
+        form = {**params, "language": "zh", "r": secrets.token_hex(8)}
+        headers = {
+            "Origin": "https://agent.qq.com",
+            "Referer": "https://agent.qq.com/page/setting",
+        }
+        response = await self._request("POST", url, data=form, headers=headers)
+        payload = await self._response_json(response, operation)
+        head = payload.get("head")
+        if not isinstance(head, Mapping):
+            raise ClientError(
+                f"{operation}响应缺少 head",
+                status_code=response.status_code,
+                details=payload,
+            )
+        ret = head.get("ret")
+        if response.is_error or isinstance(ret, bool) or ret not in (0, "0"):
+            msg = head.get("msg")
+            message = msg if isinstance(msg, str) and msg else f"ret={ret}"
+            if str(ret) == "-20002":
+                message = f"登录态失效（{message}）"
+            raise ClientError(
+                f"{operation}失败: {message}",
+                status_code=response.status_code,
+                code=str(ret),
+                details=payload,
+            )
+        body = payload.get("body")
+        if not isinstance(body, Mapping):
+            raise ClientError(
+                f"{operation}响应缺少 body",
+                status_code=response.status_code,
+                details=payload,
+            )
+        return body
 
     async def _request_json(
         self,
