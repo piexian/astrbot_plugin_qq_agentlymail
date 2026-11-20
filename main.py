@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
 import time
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star
 
 from .agentlymail.client import AgentlyMailClient, ClientError
@@ -25,7 +22,6 @@ from .agentlymail.oauth import (
     OAuthClient,
     OAuthError,
 )
-from .agentlymail.qr import fetch_wechat_qr_image
 from .agentlymail.render import format_new_mail_notice
 from .agentlymail.session import LoginRegistry
 from .agentlymail.token_store import TokenBundle, TokenStore, TokenStoreError
@@ -54,8 +50,14 @@ class QQAgentlyMailPlugin(Star):
         self._token_store = TokenStore()
         self._registry = LoginRegistry()
         # 代理环境变量会打断 agent.qq.com 的授权链路，两个客户端都直连。
+        # 代理环境变量会打断 agent.qq.com 的授权链路，两个客户端都直连；
+        # 设备流 poll 服务端长挂约 25 秒，读超时须覆盖两次保持窗口。
         self._api_http = httpx.AsyncClient(base_url=API_BASE, trust_env=False)
-        self._auth_http = httpx.AsyncClient(base_url=AUTH_BASE, trust_env=False)
+        self._auth_http = httpx.AsyncClient(
+            base_url=AUTH_BASE,
+            trust_env=False,
+            timeout=httpx.Timeout(90, connect=10),
+        )
         self._clients: dict[str, tuple[AgentlyMailClient, OAuthClient]] = {}
         self._me_cache: dict[str, Me] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -190,20 +192,16 @@ class QQAgentlyMailPlugin(Star):
             await self._registry.finish(umo)
             logger.exception(f"账号 {account} 发起设备流失败")
             return f"登录发起失败：{exc}"
+        # 微信二维码只存在于授权页内部（SPA 内嵌会话票据），外部抓取的码无法完成回调，
+        # 因此登录通知只发链接和验证码，用户自行打开链接扫码。
         notice = (
-            f"账号 {account} 登录发起成功，请用微信扫码并在手机上点确定。\n"
-            f"链接：{flow.browser_url}\n"
+            f"账号 {account} 登录发起成功。请用浏览器打开以下链接，扫码并在手机上点确定：\n"
+            f"{flow.browser_url}\n"
             f"验证码：{flow.input_code}\n"
             "二维码约 2-3 分钟过期，过期后请重新执行登录；完成后会自动推送结果。"
         )
-        chain = MessageChain().message(notice)
         try:
-            image_bytes = await fetch_wechat_qr_image(self._auth_http, flow.browser_url)
-            # 二维码是加分项，抓取失败时只降级发送链接和验证码。
-            if image_bytes is None:
-                await event.send(chain)
-            else:
-                await self._send_login_notice_with_qr(event, chain, image_bytes)
+            await event.send(MessageChain().message(notice))
         except Exception as exc:
             await self._registry.finish(umo)
             logger.exception(f"账号 {account} 的登录通知发送失败")
@@ -212,23 +210,6 @@ class QQAgentlyMailPlugin(Star):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return None
-
-    async def _send_login_notice_with_qr(
-        self,
-        event: AstrMessageEvent,
-        chain: MessageChain,
-        image_bytes: bytes,
-    ) -> None:
-        """把二维码写入临时文件发送，用完立即删除。"""
-        fd, temporary = tempfile.mkstemp(prefix="agently-qr-", suffix=".jpg")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(image_bytes)
-            chain.chain.append(Image.fromFileSystem(temporary))
-            await event.send(chain)
-        finally:
-            os.unlink(temporary)
-
     async def _complete_device_flow(
         self,
         umo: str,

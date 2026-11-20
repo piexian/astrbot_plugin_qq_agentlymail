@@ -745,7 +745,7 @@ class AgentlyMailAdminTool(FunctionTool):
             name="agently_mail_admin",
             description=(
                 "管理员专用：管理 QQ Agently Mail 账号与邮件删除。"
-                "action=login 发起微信扫码登录，二维码会发到本会话；"
+                "action=login 发起微信扫码登录，链接和验证码会发到本会话；"
                 "logout 删除账号凭证并解绑；status 列出账号与当前会话绑定；"
                 "trash 把邮件移入垃圾箱；empty_trash 清空垃圾箱；"
                 "permanent_delete 永久删除邮件。"
@@ -811,7 +811,7 @@ class AgentlyMailAdminTool(FunctionTool):
             {
                 "account": account,
                 "message": (
-                    f"账号 {account} 登录已发起，二维码已发送到本会话，"
+                    f"账号 {account} 登录已发起，链接和验证码已发送到本会话，"
                     "请扫码并在手机上确认，结果会自动推送。"
                 ),
             }
