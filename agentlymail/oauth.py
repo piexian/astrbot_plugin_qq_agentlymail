@@ -162,9 +162,15 @@ class OAuthClient:
         )
         return DeviceFlowStart.from_payload(await self._json(response, "设备流初始化"))
 
-    async def poll(self, flow: DeviceFlowStart) -> TokenBundle:
+    async def poll(
+        self,
+        flow: DeviceFlowStart,
+        deadline: float | None = None,
+    ) -> TokenBundle:
         """轮询设备授权直到完成或超时并保存新凭证。"""
-        deadline = time.monotonic() + flow.expires_in
+        flow_deadline = time.monotonic() + flow.expires_in
+        if deadline is None or deadline > flow_deadline:
+            deadline = flow_deadline
         interval = self.poll_interval
         while True:
             if time.monotonic() >= deadline:

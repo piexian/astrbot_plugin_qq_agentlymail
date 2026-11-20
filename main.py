@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import time
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image
+from astrbot.api.util import SessionController, session_waiter
 from astrbot.api.star import Context, Star
 
 from .agentlymail.client import AgentlyMailClient, ClientError
 from .agentlymail.constants import API_BASE, AUTH_BASE
+from .agentlymail.headless import (
+    Func3Result,
+    HeadlessQRLogin,
+    HeadlessQRLoginError,
+    HeadlessQRSession,
+)
 from .agentlymail.models import Me
 from .agentlymail.oauth import (
     AccessDeniedError,
@@ -192,34 +202,168 @@ class QQAgentlyMailPlugin(Star):
             await self._registry.finish(umo)
             logger.exception(f"账号 {account} 发起设备流失败")
             return f"登录发起失败：{exc}"
-        # 微信二维码只存在于授权页内部（SPA 内嵌会话票据），外部抓取的码无法完成回调，
-        # 因此登录通知只发链接和验证码，用户自行打开链接扫码。
-        notice = (
+
+        deadline = time.monotonic() + flow.expires_in
+        headless: HeadlessQRLogin | None = None
+        qr_session: HeadlessQRSession | None = None
+        user_code: str | None = None
+        try:
+            user_code = HeadlessQRLogin.user_code_from_browser_url(flow.browser_url)
+            headless = HeadlessQRLogin()
+            qr_session = await headless.create_qr_session(deadline=deadline)
+        except HeadlessQRLoginError as exc:
+            logger.warning(
+                f"账号 {account} 无头二维码创建失败，降级发送浏览器链接：{exc}"
+            )
+            if headless is not None:
+                await self._close_headless(account, headless)
+            headless = None
+            qr_session = None
+        except Exception:
+            logger.exception(f"账号 {account} 创建无头二维码异常，降级发送浏览器链接")
+            if headless is not None:
+                await self._close_headless(account, headless)
+            headless = None
+            qr_session = None
+
+        fallback_notice = (
             f"账号 {account} 登录发起成功。请用浏览器打开以下链接，扫码并在手机上点确定：\n"
             f"{flow.browser_url}\n"
             f"验证码：{flow.input_code}\n"
             "二维码约 2-3 分钟过期，过期后请重新执行登录；完成后会自动推送结果。"
         )
+        if qr_session is None or headless is None:
+            notice = fallback_notice
+        else:
+            notice = (
+                f"账号 {account} 登录发起成功，请使用下方二维码扫码并在手机上点确定。\n"
+                f"{qr_session.expires_hint}\n"
+                f"备用链接：{flow.browser_url}\n"
+                f"验证码：{flow.input_code}\n"
+                "扫码完成后会自动推送结果。"
+            )
+
         try:
-            await event.send(MessageChain().message(notice))
+            if qr_session is not None and headless is not None:
+                await self._send_login_notice_with_qr(
+                    event,
+                    MessageChain().message(notice),
+                    qr_session.image,
+                )
+            else:
+                await event.send(MessageChain().message(notice))
         except Exception as exc:
-            await self._registry.finish(umo)
-            logger.exception(f"账号 {account} 的登录通知发送失败")
-            return f"登录发起成功，但通知发送失败：{exc}"
-        task = asyncio.create_task(self._complete_device_flow(umo, account, flow))
+            if qr_session is not None and headless is not None:
+                logger.warning(
+                    f"账号 {account} 二维码发送失败，改发浏览器链接：{exc}"
+                )
+                await self._close_headless(account, headless)
+                headless = None
+                qr_session = None
+                try:
+                    await event.send(MessageChain().message(fallback_notice))
+                except Exception as fallback_exc:
+                    await self._registry.finish(umo)
+                    logger.exception(f"账号 {account} 的登录通知发送失败")
+                    return f"登录发起成功，但通知发送失败：{fallback_exc}"
+            else:
+                await self._registry.finish(umo)
+                logger.exception(f"账号 {account} 的登录通知发送失败")
+                return f"登录发起成功，但通知发送失败：{exc}"
+
+        task = asyncio.create_task(
+            self._complete_device_flow(
+                event,
+                account,
+                flow,
+                deadline=deadline,
+                headless=headless,
+                qr_session=qr_session,
+                user_code=user_code,
+            )
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return None
+
+    async def _send_login_notice_with_qr(
+        self,
+        event: AstrMessageEvent,
+        chain: MessageChain,
+        image_bytes: bytes,
+    ) -> None:
+        """把二维码写入临时文件发送，用完立即删除。"""
+        fd, temporary = tempfile.mkstemp(prefix="agently-qr-", suffix=".jpg")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(image_bytes)
+            chain.chain.append(Image.fromFileSystem(temporary))
+            await event.send(chain)
+        finally:
+            os.unlink(temporary)
+
+    async def _close_headless(self, account: str, headless: HeadlessQRLogin) -> None:
+        """关闭无头登录客户端，清理失败只记录日志。"""
+        try:
+            await headless.close()
+        except Exception:
+            logger.exception(f"账号 {account} 关闭无头登录客户端失败")
+
     async def _complete_device_flow(
         self,
-        umo: str,
+        event: AstrMessageEvent,
         account: str,
         flow: DeviceFlowStart,
+        *,
+        deadline: float,
+        headless: HeadlessQRLogin | None,
+        qr_session: HeadlessQRSession | None,
+        user_code: str | None,
     ) -> None:
-        """后台轮询设备流，完成后向发起会话回推结果。"""
+        """后台完成无头二维码和设备流授权，完成后向发起会话回推结果。"""
+        umo = event.unified_msg_origin
         client, oauth = self._clients_for(account)
         try:
-            bundle = await oauth.poll(flow)
+            if headless is None:
+                bundle = await oauth.poll(flow, deadline=deadline)
+            else:
+                if qr_session is None or user_code is None:
+                    raise HeadlessQRLoginError(
+                        "invalid_state",
+                        "无头二维码登录缺少设备流参数",
+                    )
+
+                async def on_qr_status(status_code: int) -> None:
+                    if status_code == 404:
+                        await self._push(umo, "已扫码，请在手机上确认。")
+
+                wx_code = await headless.poll_wx_code(
+                    qr_session,
+                    deadline,
+                    on_status=on_qr_status,
+                )
+                func3_result = await headless.func3(
+                    user_code,
+                    wx_code,
+                    deadline=deadline,
+                )
+                email = await self._select_agent_mail(
+                    event,
+                    func3_result,
+                    deadline,
+                )
+                await headless.func8(
+                    user_code,
+                    email,
+                    func3_result.login_tmpticket,
+                    deadline=deadline,
+                )
+                bundle = await oauth.poll(flow, deadline=deadline)
+        except HeadlessQRLoginError as exc:
+            await self._push(
+                umo,
+                f"账号 {account} 登录失败：{self._headless_error_message(exc)}",
+            )
         except AccessDeniedError as exc:
             await self._push(umo, f"账号 {account} 登录失败：{exc.message}。")
         except ExpiredTokenError as exc:
@@ -252,7 +396,93 @@ class QQAgentlyMailPlugin(Star):
                     "请执行 /agently status 检查。",
                 )
         finally:
+            if headless is not None:
+                await self._close_headless(account, headless)
             await self._registry.finish(umo)
+
+    async def _select_agent_mail(
+        self,
+        event: AstrMessageEvent,
+        result: Func3Result,
+        deadline: float,
+    ) -> str:
+        """自动或在当前会话中选择 func=3 返回的邮箱。"""
+        if len(result.mails) == 1:
+            mail = result.mails[0]
+            if not mail.is_selected:
+                raise HeadlessQRLoginError(
+                    "invalid_response",
+                    "唯一可用邮箱没有 is_selected 标记",
+                )
+            return mail.email
+
+        lines = ["检测到多个可用邮箱，请在 120 秒内回复邮箱编号："]
+        for index, mail in enumerate(result.mails, start=1):
+            selected = "（服务端默认）" if mail.is_selected else ""
+            lines.append(f"{index}. {mail.email}{selected}")
+        lines.append("回复“取消”可终止本次登录。")
+        await event.send(event.plain_result("\n".join(lines)))
+
+        choice: dict[str, str] = {}
+        initiator_id = event.get_sender_id()
+
+        @session_waiter(timeout=120)
+        async def mail_waiter(
+            controller: SessionController,
+            incoming: AstrMessageEvent,
+        ) -> None:
+            if incoming.get_sender_id() != initiator_id:
+                return
+            text = incoming.message_str.strip()
+            if text in {"取消", "c", "cancel"}:
+                choice["error"] = "cancelled"
+                controller.stop()
+                return
+            if not text.isdecimal():
+                await incoming.send(
+                    incoming.plain_result("请回复列表中的邮箱编号，或回复“取消”。")
+                )
+                return
+            index = int(text) - 1
+            if not 0 <= index < len(result.mails):
+                await incoming.send(
+                    incoming.plain_result("邮箱编号无效，请重新回复列表中的编号。")
+                )
+                return
+            choice["email"] = result.mails[index].email
+            controller.stop()
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HeadlessQRLoginError("expired", "无头二维码登录已超时")
+        try:
+            await asyncio.wait_for(mail_waiter(event), timeout=min(120.0, remaining))
+        except TimeoutError as exc:
+            raise HeadlessQRLoginError("mail_timeout", "邮箱选择超时") from exc
+
+        if choice.get("error") == "cancelled":
+            raise HeadlessQRLoginError("cancelled", "用户已取消登录")
+        email = choice.get("email")
+        if email is None:
+            raise HeadlessQRLoginError("invalid_state", "邮箱选择未返回结果")
+        return email
+
+    @staticmethod
+    def _headless_error_message(error: HeadlessQRLoginError) -> str:
+        """把无头登录协议错误转换为可执行的用户提示。"""
+        if error.code == "expired":
+            return "登录流程已超时，请重新执行 /agently login。"
+        if error.code == "mail_timeout":
+            return "邮箱选择已超时，请重新执行 /agently login。"
+        if error.code == "cancelled":
+            return "用户已取消登录。"
+        if error.code == "-601":
+            return "微信登录返回 -601，系统失败或邮箱为空，请重新执行 /agently login。"
+        if error.code == "-75111":
+            return "微信登录返回 -75111，扫码链接已使用或流程不匹配，请重新执行 /agently login。"
+        if error.code == "-5012":
+            return "微信登录返回 -5012，登录票据已过期或已消费，请重新执行 /agently login。"
+        return f"{error.message}。"
 
     async def _announce_login_success(
         self,
