@@ -21,5 +21,7 @@ QQ Agently Mail 插件直连 `agent.qq.com`，提供 LLM 工具与 WebUI，目�
 - `agently_mail_send`（所有用户）：`send`/`reply`/`forward` 发信（两阶段确认、本地附件、白名单校验），`watch_start`/`watch_stop` 启停新邮件监听，新邮件自动推送到会话。
 - `agently_mail_admin`（仅管理员）：`login` 扫码登录（二维码发到会话）、`logout` 删凭证解绑、`status` 账号概览、`trash`/`empty_trash`/`permanent_delete` 删除类操作。
 
+日常读写可用可选参数 `account`、`alias_id` 指定已登录账号及其所属地址；缺省使用会话绑定账号的主地址。
+
 配置项：`tools_enabled`（默认开启，关闭则不注册工具）、`mail_send_whitelist`（收件人白名单，留空不限）。
 凭证保存于 `data/plugin_data/astrbot_plugin_qq_agentlymail/`（0600 权限，按账号一个文件）。

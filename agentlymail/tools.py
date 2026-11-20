@@ -22,7 +22,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 from .client import ClientError
 from .oauth import OAuthError
 from .render import format_message, format_summary_list
-from .token_store import DEFAULT_STORAGE_ROOT
+from .token_store import DEFAULT_STORAGE_ROOT, TokenStoreError
 
 if TYPE_CHECKING:
     from ..main import QQAgentlyMailPlugin
@@ -140,6 +140,87 @@ async def _resolve_account(
     return account, None
 
 
+@dataclass(frozen=True)
+class _ResolvedMailbox:
+    """保存一次工具调用选定的账号、客户端和邮箱地址。"""
+
+    account: str
+    client: Any
+    me: Any
+    alias_id: str
+    email: str
+
+
+async def _resolve_mailbox(
+    plugin: QQAgentlyMailPlugin,
+    event: AstrMessageEvent,
+    kwargs: dict[str, Any],
+) -> tuple[_ResolvedMailbox | None, ToolExecResult | None]:
+    """解析账号和别名，并在邮件操作前校验凭证与别名归属。"""
+    if "account" in kwargs:
+        raw_account = kwargs["account"]
+        if not isinstance(raw_account, str) or not raw_account.strip():
+            return None, error_result("account 必须是非空字符串")
+        account = raw_account.strip()
+    else:
+        account, failure = await _resolve_account(plugin, event)
+        if failure is not None:
+            return None, failure
+        if not isinstance(account, str) or not account.strip():
+            return None, error_result("当前会话绑定的账号名无效")
+
+    if account in {".", ".."} or any(char in account for char in ("\x00", "/", "\\")):
+        return None, error_result("account 为空或含非法路径字符")
+
+    requested_alias_id: str | None = None
+    if "alias_id" in kwargs:
+        raw_alias_id = kwargs["alias_id"]
+        if not isinstance(raw_alias_id, str) or not raw_alias_id.strip():
+            return None, error_result("alias_id 必须是非空字符串")
+        requested_alias_id = raw_alias_id.strip()
+        if not _safe_path_identifier(requested_alias_id):
+            return None, error_result("alias_id 含非法路径字符")
+
+    try:
+        if await plugin._token_store.load(account) is None:
+            return None, error_result(
+                f"账号 {account!r} 没有可用凭证",
+                "请先执行 /agently login <账号名>，或绑定已有账号。",
+            )
+    except TokenStoreError as exc:
+        return None, error_result(f"读取账号 {account!r} 凭证失败：{exc}")
+
+    client, _ = plugin._clients_for(account)
+    try:
+        me = await client.me()
+    except TokenStoreError as exc:
+        return None, error_result(f"读取账号 {account!r} 凭证失败：{exc}")
+
+    selected_alias = None
+    if requested_alias_id is None:
+        selected_alias = next((alias for alias in me.aliases if alias.is_primary), None)
+        if selected_alias is None:
+            return None, error_result("/v1/me 未返回 is_primary 别名")
+    else:
+        selected_alias = next(
+            (alias for alias in me.aliases if alias.alias_id == requested_alias_id),
+            None,
+        )
+        if selected_alias is None:
+            return None, error_result("邮箱地址不存在或不属于该账号")
+
+    return (
+        _ResolvedMailbox(
+            account=account,
+            client=client,
+            me=me,
+            alias_id=selected_alias.alias_id,
+            email=selected_alias.email or selected_alias.alias_id,
+        ),
+        None,
+    )
+
+
 def _required_text(kwargs: dict[str, Any], key: str) -> str | None:
     """取必填字符串参数，缺失或空白时返回 None。"""
     value = kwargs.get(key)
@@ -248,8 +329,9 @@ class AgentlyMailReadTool(FunctionTool):
         super().__init__(
             name="agently_mail_read",
             description=(
-                "读取当前会话绑定的 QQ Agently Mail 邮箱。"
-                "action=whoami 查看绑定账号与邮箱；list 按目录分页列摘要；"
+                "读取 QQ Agently Mail 邮箱；默认使用当前会话绑定账号的主地址，"
+                "可用 account/alias_id 指定已登录账号及其所属地址。"
+                "action=whoami 查看选中账号与邮箱；list 按目录分页列摘要；"
                 "read 按 message_id 读全文（可选下载附件）；search 按关键词搜索；"
                 "quota 估算发信额度。"
             ),
@@ -259,6 +341,8 @@ class AgentlyMailReadTool(FunctionTool):
                         "要执行的操作",
                         ["whoami", "list", "read", "search", "quota"],
                     ),
+                    "account": string_param("可选账号名，缺省使用当前会话绑定账号"),
+                    "alias_id": string_param("可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "dir": enum_param(
                         "list 的邮件目录",
                         ["inbox", "sent", "trash", "spam"],
@@ -311,15 +395,15 @@ class AgentlyMailReadTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
-        client, _ = self._plugin._clients_for(account)
-        me = await client.me()
+        me = mailbox.me
         return ok_result(
             {
-                "account": account,
-                "email": self._plugin._primary_email(me),
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
+                "email": mailbox.email,
                 "aliases": [
                     {
                         "alias_id": alias.alias_id,
@@ -339,22 +423,23 @@ class AgentlyMailReadTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         direction = kwargs.get("dir") or "inbox"
         limit = kwargs.get("limit", 10)
         cursor = kwargs.get("cursor")
-        client, _ = self._plugin._clients_for(account)
-        page = await client.list_messages(
+        page = await mailbox.client.list_messages(
             direction=direction,
             limit=limit,
             cursor=cursor if isinstance(cursor, str) and cursor else None,
             unread=kwargs.get("unread"),
+            alias_id=mailbox.alias_id,
         )
         return ok_result(
             {
-                "account": account,
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
                 "dir": direction,
                 "count": len(page.data),
                 "has_more": page.has_more,
@@ -368,7 +453,7 @@ class AgentlyMailReadTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         message_id = _required_text(kwargs, "message_id")
@@ -391,9 +476,12 @@ class AgentlyMailReadTool(FunctionTool):
             return error_result("message_id 含非法路径字符")
         if attachment_id and not _safe_path_identifier(attachment_id):
             return error_result("attachment_id 含非法路径字符")
-        client, _ = self._plugin._clients_for(account)
-        message = await client.read(message_id)
-        data: dict[str, Any] = {"message": format_message(message, max_body_chars)}
+        message = await mailbox.client.read(message_id, alias_id=mailbox.alias_id)
+        data: dict[str, Any] = {
+            "account": mailbox.account,
+            "alias_id": mailbox.alias_id,
+            "message": format_message(message, max_body_chars),
+        }
         if attachment_id:
             attachment = next(
                 (
@@ -405,7 +493,11 @@ class AgentlyMailReadTool(FunctionTool):
             )
             if attachment is None:
                 return error_result(f"邮件 {message_id} 没有附件 {attachment_id}")
-            content = await client.download(message_id, attachment_id)
+            content = await mailbox.client.download(
+                message_id,
+                attachment_id,
+                alias_id=mailbox.alias_id,
+            )
             filename = _safe_filename(attachment.filename or attachment_id)
             path = await asyncio.to_thread(
                 _save_attachment,
@@ -425,7 +517,7 @@ class AgentlyMailReadTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         query = _required_text(kwargs, "q")
@@ -434,16 +526,17 @@ class AgentlyMailReadTool(FunctionTool):
         search_in = kwargs.get("search_in") or "SEARCH_IN_ALL"
         limit = kwargs.get("limit", 10)
         cursor = kwargs.get("cursor")
-        client, _ = self._plugin._clients_for(account)
-        page = await client.search(
+        page = await mailbox.client.search(
             query,
             limit=limit,
             search_in=search_in,
             cursor=cursor if isinstance(cursor, str) and cursor else None,
+            alias_id=mailbox.alias_id,
         )
         return ok_result(
             {
-                "account": account,
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
                 "q": query,
                 "search_in": search_in,
                 "count": len(page.data),
@@ -458,18 +551,21 @@ class AgentlyMailReadTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
-        client, _ = self._plugin._clients_for(account)
-        me = await client.me()
-        sent_page = await client.list_messages(direction="sent", limit=50)
+        sent_page = await mailbox.client.list_messages(
+            direction="sent",
+            limit=50,
+            alias_id=mailbox.alias_id,
+        )
         sent_count = len(sent_page.data)
         return ok_result(
             {
-                "account": account,
-                "rate_limits": me.rate_limits.values,
-                "sent_today_local": await self._plugin._send_count_today(account),
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
+                "rate_limits": mailbox.me.rate_limits.values,
+                "sent_today_local": await self._plugin._send_count_today(mailbox.account),
                 "sent_folder_first_page": "50+" if sent_count >= 50 else sent_count,
             }
         )
@@ -483,7 +579,8 @@ class AgentlyMailSendTool(FunctionTool):
         super().__init__(
             name="agently_mail_send",
             description=(
-                "用当前会话绑定的 QQ Agently Mail 邮箱发信。"
+                "用 QQ Agently Mail 邮箱发信；send/reply/forward 默认使用当前会话绑定账号的主地址，"
+                "可用 account/alias_id 指定已登录账号及其所属地址；"
                 "action=send 发新邮件（可带本地附件）；reply 回复指定邮件；"
                 "forward 转发指定邮件；watch_start/watch_stop 启停新邮件监听，"
                 "收到新邮件会自动推送到本会话。"
@@ -494,6 +591,8 @@ class AgentlyMailSendTool(FunctionTool):
                         "要执行的操作",
                         ["send", "reply", "forward", "watch_start", "watch_stop"],
                     ),
+                    "account": string_param("send/reply/forward 可选账号名，缺省使用当前会话绑定账号"),
+                    "alias_id": string_param("send/reply/forward 可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "to": string_array_param("send/forward 的收件人邮箱地址"),
                     "cc": string_array_param("send 的抄送邮箱地址"),
                     "bcc": string_array_param("send 的密送邮箱地址"),
@@ -572,7 +671,7 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         to = _string_list(kwargs.get("to"))
@@ -597,20 +696,21 @@ class AgentlyMailSendTool(FunctionTool):
             return error_result(f"读取附件文件失败：{exc}")
         except ValueError as exc:
             return error_result(str(exc))
-        client, _ = self._plugin._clients_for(account)
-        await client.send(
+        await mailbox.client.send(
             to=to,
             subject=subject,
             body=body,
             body_format=body_format,
+            alias_id=mailbox.alias_id,
             cc=cc,
             bcc=bcc,
             attachments=attachments,
         )
-        await self._plugin._record_send(account)
+        await self._plugin._record_send(mailbox.account)
         return ok_result(
             {
-                "account": account,
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
                 "queued": True,
                 "to": to,
                 "subject": subject,
@@ -623,7 +723,7 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         message_id = _required_text(kwargs, "message_id")
@@ -636,9 +736,11 @@ class AgentlyMailSendTool(FunctionTool):
         reply_all = kwargs.get("reply_all", False)
         if not isinstance(reply_all, bool):
             return error_result("reply_all 必须是布尔值")
-        client, _ = self._plugin._clients_for(account)
         if self._plugin._config.get("mail_send_whitelist"):
-            original = await client.read(message_id)
+            original = await mailbox.client.read(
+                message_id,
+                alias_id=mailbox.alias_id,
+            )
             recipients = self._reply_recipients(original, reply_all)
             if not recipients:
                 return error_result(
@@ -648,16 +750,18 @@ class AgentlyMailSendTool(FunctionTool):
             blocked = self._check_whitelist(recipients)
             if blocked is not None:
                 return blocked
-        await client.reply(
+        await mailbox.client.reply(
             message_id,
             body=body,
             body_format=body_format,
             reply_all=reply_all,
+            alias_id=mailbox.alias_id,
         )
-        await self._plugin._record_send(account)
+        await self._plugin._record_send(mailbox.account)
         return ok_result(
             {
-                "account": account,
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
                 "queued": True,
                 "message_id": message_id,
                 "reply_all": reply_all,
@@ -669,7 +773,7 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
+        mailbox, failure = await _resolve_mailbox(self._plugin, event, kwargs)
         if failure is not None:
             return failure
         message_id = _required_text(kwargs, "message_id")
@@ -688,18 +792,19 @@ class AgentlyMailSendTool(FunctionTool):
         blocked = self._check_whitelist(to)
         if blocked is not None:
             return blocked
-        client, _ = self._plugin._clients_for(account)
-        await client.forward(
+        await mailbox.client.forward(
             message_id,
             to=to,
             body=body,
             body_format=body_format,
             include_attachments=include_attachments,
+            alias_id=mailbox.alias_id,
         )
-        await self._plugin._record_send(account)
+        await self._plugin._record_send(mailbox.account)
         return ok_result(
             {
-                "account": account,
+                "account": mailbox.account,
+                "alias_id": mailbox.alias_id,
                 "queued": True,
                 "message_id": message_id,
                 "to": to,
