@@ -152,15 +152,20 @@ class MessageSummary:
     subject: str | None = None
     from_: Sender | None = None
     created_at: str | None = None
+    is_read: bool | None = None
 
     @classmethod
     def from_payload(cls, value: Any) -> MessageSummary:
         payload = _as_mapping(value, "message summary")
+        is_read = payload.get("is_read")
+        if is_read is not None and not isinstance(is_read, bool):
+            raise ValueError("message summary.is_read 应为布尔值")
         return cls(
             message_id=_message_id(payload),
             subject=_optional_text(payload.get("subject")),
             from_=_sender(payload.get("from"), "message summary.from"),
             created_at=_optional_text(payload.get("created_at")),
+            is_read=is_read,
         )
 
 

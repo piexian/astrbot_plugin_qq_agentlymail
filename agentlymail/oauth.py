@@ -6,6 +6,7 @@ import asyncio
 import socket
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from typing import Any, Mapping
 
 import httpx
@@ -13,6 +14,25 @@ import httpx
 from .constants import AUTH_BASE, CLI_VERSION, DEVICE_PATH, TOKEN_PATH, USER_AGENT
 from .token_store import TokenBundle, TokenStore
 
+
+
+def _trusted_agent_url(value: str) -> bool:
+    """只接受 agent.qq.com 信任域的 HTTPS 设备流地址。"""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    host = parsed.hostname
+    return (
+        parsed.scheme == "https"
+        and host is not None
+        and (host == "agent.qq.com" or host.endswith(".agent.qq.com"))
+        and port is None
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
 
 class OAuthError(RuntimeError):
     """表示 OAuth 请求或授权流程失败。"""
@@ -74,6 +94,16 @@ class DeviceFlowStart:
             raise OAuthError("invalid_response", "设备流响应缺少 browser_url")
         if not isinstance(input_code, str) or not input_code:
             raise OAuthError("invalid_response", "设备流响应缺少 input_code")
+        if not _trusted_agent_url(poll_url):
+            raise OAuthError(
+                "invalid_response",
+                "设备流响应的 poll_url 不是可信 HTTPS 地址",
+            )
+        if not _trusted_agent_url(browser_url):
+            raise OAuthError(
+                "invalid_response",
+                "设备流响应的 browser_url 不是可信 HTTPS 地址",
+            )
         if isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)):
             raise OAuthError("invalid_response", "设备流响应缺少数字 expires_in")
         return cls(

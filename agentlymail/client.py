@@ -101,15 +101,20 @@ class AgentlyMailClient:
         limit: int = 50,
         direction: str = "inbox",
         cursor: str | None = None,
+        unread: bool | None = None,
     ) -> Page[MessageSummary]:
-        """分页读取指定别名的邮件列表。"""
+        """分页读取指定别名的邮件列表，unread 为 True 时只取未读。"""
         alias = await self._resolve_alias(alias_id)
         self._validate_limit(limit)
+        if unread is not None and not isinstance(unread, bool):
+            raise ClientError("unread 必须是布尔值")
         if direction not in {"inbox", "sent", "trash", "spam"}:
             raise ClientError(f"不支持的邮件目录: {direction}")
         params: dict[str, Any] = {"limit": limit, "dir": direction}
         if cursor is not None:
             params["cursor"] = cursor
+        if unread:
+            params["unread"] = "true"
         payload = await self._request_json(
             "GET",
             f"/v1/aliases/{alias}/messages",
@@ -595,3 +600,5 @@ class AgentlyMailClient:
     def _require_identifier(value: str | None, name: str) -> None:
         if not isinstance(value, str) or not value:
             raise ClientError(f"{name} 不能为空")
+        if any(ord(char) < 32 or char in "/\\?#%" for char in value):
+            raise ClientError(f"{name} 含非法路径字符")
