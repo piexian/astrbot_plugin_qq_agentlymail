@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -31,6 +32,36 @@ from .token_store import TokenStore
 # 别名管理端点在 agent.qq.com 主站，直接认 OAuth Bearer，不走 API 子域。
 MGR_URL = "https://agent.qq.com/agent/mgr"
 GETACCOUNT_URL = "https://agent.qq.com/agent/getaccount"
+
+# 附件下载单次内存上限（略高于协议 20MB 附件限制，防止异常响应耗尽内存）。
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _validate_download_url(value: str) -> None:
+    """校验外链附件下载地址仅允许公网 HTTPS，拒绝本地与私网目标。"""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ClientError("下载附件失败: 无效的 download_url") from exc
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or port not in (None, 443)
+    ):
+        raise ClientError("下载附件失败: download_url 必须是标准 HTTPS 地址")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise ClientError("下载附件失败: 拒绝访问本地或内网 download_url")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise ClientError("下载附件失败: 拒绝访问非公网 IP 的 download_url")
 
 
 
@@ -565,13 +596,36 @@ class AgentlyMailClient:
         try:
             self._require_identifier(message_id, "message_id")
             if download_url is not None:
+                _validate_download_url(download_url)
                 endpoint = _safe_endpoint(download_url)
                 started = time.perf_counter()
-                # download_url 是可直接访问的下载地址，不带 Bearer，避免凭证泄露给外部域。
+                # download_url 是可直接访问的下载地址，不带 Bearer 且不跟随重定向，避免凭证泄露或 SSRF。
                 try:
-                    response = await self._http.request(
-                        "GET", download_url, headers={"User-Agent": USER_AGENT}
-                    )
+                    async with self._http.stream(
+                        "GET",
+                        download_url,
+                        headers={"User-Agent": USER_AGENT},
+                        follow_redirects=False,
+                    ) as response:
+                        logger.debug(
+                            f"[agently] 客户端下载 HTTP 完成 账号={self.account} "
+                            f"地址={endpoint} 状态码={response.status_code} "
+                            f"耗时={time.perf_counter() - started:.3f}s"
+                        )
+                        if response.is_redirect:
+                            raise ClientError(
+                                "下载附件失败: 拒绝未受信任的下载地址重定向",
+                                status_code=response.status_code,
+                            )
+                        if response.is_error:
+                            await response.aread()
+                            await self._raise_response(response, "下载附件")
+                        chunks = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            chunks.extend(chunk)
+                            if len(chunks) > MAX_DOWNLOAD_BYTES:
+                                raise ClientError("下载附件失败: 附件体积超过 25MB 安全上限")
+                        data = bytes(chunks)
                 except httpx.HTTPError as exc:
                     logger.warning(
                         f"[agently] 客户端下载传输失败 账号={self.account} "
@@ -579,10 +633,10 @@ class AgentlyMailClient:
                     )
                     raise ClientError("下载附件失败: 网络请求失败") from exc
                 logger.debug(
-                    f"[agently] 客户端下载 HTTP 完成 账号={self.account} "
-                    f"地址={endpoint} 状态码={response.status_code} "
-                    f"耗时={time.perf_counter() - started:.3f}s"
+                    f"[agently] 客户端操作完成 操作=download 账号={self.account} "
+                    f"邮件ID={message_id} 字节数={len(data)}"
                 )
+                return data
             else:
                 alias = await self._resolve_alias(alias_id)
                 self._require_identifier(attachment_id, "attachment_id")
@@ -590,6 +644,8 @@ class AgentlyMailClient:
                 response = await self._request("GET", url)
             if response.is_error:
                 await self._raise_response(response, "下载附件")
+            if len(response.content) > MAX_DOWNLOAD_BYTES:
+                raise ClientError("下载附件失败: 附件体积超过 25MB 安全上限")
             logger.debug(
                 f"[agently] 客户端操作完成 操作=download 账号={self.account} "
                 f"邮件ID={message_id} 字节数={len(response.content)}"
@@ -821,6 +877,7 @@ class AgentlyMailClient:
         **kwargs: Any,
     ) -> httpx.Response:
         endpoint = _safe_endpoint(path)
+        base_headers = dict(kwargs.pop("headers", {}))
         refreshed = False
         rate_attempt = 0
         request_attempt = 0
@@ -836,7 +893,7 @@ class AgentlyMailClient:
             if bundle is None:
                 logger.debug(f"[agently] 客户端请求无可用凭证 账号={self.account}")
                 raise ClientError(f"账号 {self.account!r} 没有可用凭证")
-            headers = dict(kwargs.pop("headers", {}))
+            headers = dict(base_headers)
             headers["User-Agent"] = USER_AGENT
             headers["Authorization"] = f"Bearer {bundle.access_token}"
             try:
@@ -1039,5 +1096,5 @@ class AgentlyMailClient:
     def _require_identifier(value: str | None, name: str) -> None:
         if not isinstance(value, str) or not value:
             raise ClientError(f"{name} 不能为空")
-        if any(ord(char) < 32 or char in "/\\?#%" for char in value):
+        if value in {".", ".."} or any(ord(char) < 32 or char in "/\\?#%" for char in value):
             raise ClientError(f"{name} 含非法路径字符")

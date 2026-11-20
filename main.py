@@ -116,11 +116,30 @@ class QQAgentlyMailPlugin(Star):
         await self._api_http.aclose()
         logger.info("[agently] 插件卸载完成")
 
+    @staticmethod
+    def _validate_account_name(account: str) -> str | None:
+        """校验账号名合法性，拒绝空串、超长值与路径特殊字符。"""
+        if not isinstance(account, str):
+            return None
+        name = account.strip()
+        if (
+            not name
+            or len(name) > 64
+            or name in {".", ".."}
+            or any(char in name for char in ("\x00", "/", "\\"))
+        ):
+            return None
+        return name
+
     @agently_group.command("login")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def login(self, event: AstrMessageEvent, account: str = "default"):
         """发起扫码登录，可带账号名，缺省 default"""
-        error = await self._start_login(event, account)
+        valid = self._validate_account_name(account)
+        if valid is None:
+            await event.send(event.plain_result("账号名无效：不能为空、超过 64 字符或包含非法路径字符。"))
+            return
+        error = await self._start_login(event, valid)
         if error is not None:
             await event.send(event.plain_result(error))
 
@@ -128,16 +147,20 @@ class QQAgentlyMailPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def logout(self, event: AstrMessageEvent, account: str = "default"):
         """删除账号凭证并解绑引用它的会话，可带账号名，缺省 default"""
-        deleted, unbound, error = await self._remove_account(account)
+        valid = self._validate_account_name(account)
+        if valid is None:
+            await event.send(event.plain_result("账号名无效：不能为空、超过 64 字符或包含非法路径字符。"))
+            return
+        deleted, unbound, error = await self._remove_account(valid)
         if error is not None:
             await event.send(event.plain_result(error))
             return
         if not deleted:
-            await event.send(event.plain_result(f"账号 {account} 没有已保存的凭证。"))
+            await event.send(event.plain_result(f"账号 {valid} 没有已保存的凭证。"))
             return
         await event.send(
             event.plain_result(
-                f"已删除账号 {account} 的凭证，并解除 {unbound} 个会话的绑定。",
+                f"已删除账号 {valid} 的凭证，并解除 {unbound} 个会话的绑定。",
             ),
         )
     @agently_group.command("status")
@@ -173,7 +196,23 @@ class QQAgentlyMailPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def bind(self, event: AstrMessageEvent, account: str):
         """把当前会话绑定到指定账号"""
-        if await self._token_store.load(account) is None:
+        valid = self._validate_account_name(account)
+        if valid is None:
+            logger.warning("[agently] 绑定失败：账号名含非法字符或超长")
+            await event.send(event.plain_result("账号名无效：不能为空、超过 64 字符或包含非法路径字符。"))
+            return
+        account = valid
+        try:
+            bundle = await self._token_store.load(account)
+        except TokenStoreError as exc:
+            logger.warning(f"[agently] 绑定失败：账号={account}，异常={type(exc).__name__}")
+            await event.send(
+                event.plain_result(
+                    f"账号 {account} 的凭证文件无效，请重新执行 /agently login {account}。",
+                ),
+            )
+            return
+        if bundle is None:
             logger.warning(f"[agently] 绑定失败：账号={account}，原因=凭证不存在")
             await event.send(
                 event.plain_result(
@@ -235,6 +274,10 @@ class QQAgentlyMailPlugin(Star):
 
     async def _start_login(self, event: AstrMessageEvent, account: str) -> str | None:
         """发起设备流登录并把扫码通知发到会话，返回错误文本或 None。"""
+        valid = self._validate_account_name(account)
+        if valid is None:
+            return "账号名无效：不能为空、超过 64 字符或包含非法路径字符。"
+        account = valid
         umo = event.unified_msg_origin
         logger.info(f"[agently] 登录发起：账号={account}")
         if not await self._registry.start(umo, LOGIN_FLOW_TTL_SECONDS):
@@ -647,6 +690,10 @@ class QQAgentlyMailPlugin(Star):
 
     async def _remove_account(self, account: str) -> tuple[bool, int, str | None]:
         """先清理监听，再删除凭证和绑定，并返回明确清理错误。"""
+        valid = self._validate_account_name(account)
+        if valid is None:
+            return False, 0, "账号名无效：不能为空、超过 64 字符或包含非法路径字符。"
+        account = valid
         logger.debug(f"[agently] 账号登出开始：账号={account}")
         cleanup_errors = await self._stop_watches_for_account(account)
         if cleanup_errors:
@@ -1052,6 +1099,25 @@ class QQAgentlyMailPlugin(Star):
             f"[agently] 监听恢复完成：配置数量={len(configs)}，恢复数量={restored}，"
             f"失败数量={failed}，跳过数量={skipped}"
         )
+
+    async def _watched_account_for(self, umo: str) -> str | None:
+        """返回会话当前运行中或已持久化监听的账号名，无监听时返回 None。"""
+        entry = self._watch_tasks.get(umo)
+        if entry is not None and not entry.task.done():
+            return entry.account
+        async with self._watch_config_lock:
+            try:
+                configs = await self._read_watch_configs_locked()
+            except Exception:
+                return None
+            if not configs or umo not in configs:
+                return None
+            raw = configs.get(umo)
+            if isinstance(raw, dict):
+                acct = raw.get("account")
+                if isinstance(acct, str) and acct.strip():
+                    return acct.strip()
+        return None
 
     async def _stop_watch(self, umo: str) -> tuple[bool, str | None]:
         """取消任务并删除持久化配置，返回是否发现监听及清理错误。"""

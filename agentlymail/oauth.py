@@ -14,7 +14,7 @@ import httpx
 from astrbot.api import logger
 
 from .constants import AUTH_BASE, CLI_VERSION, DEVICE_PATH, TOKEN_PATH, USER_AGENT
-from .token_store import TokenBundle, TokenStore
+from .token_store import TokenBundle, TokenStore, TokenStoreError
 
 
 def _safe_endpoint(value: str) -> str:
@@ -157,7 +157,14 @@ class OAuthClient:
         """启动 OAuth 设备流并返回扫码地址和轮询地址。"""
         logger.debug(f"[agently] OAuth 设备流开始 账号={self.account}")
         try:
-            existing = await self.token_store.load(self.account)
+            try:
+                existing = await self.token_store.load(self.account)
+            except TokenStoreError as exc:
+                logger.warning(
+                    f"[agently] OAuth 设备流忽略损坏的旧凭证，将继续重新登录 "
+                    f"账号={self.account} 异常={type(exc).__name__}"
+                )
+                existing = None
             logger.debug(
                 f"[agently] OAuth 设备流凭证检查 账号={self.account} "
                 f"复用应用标识={bool(existing is not None and existing.app_id)}"

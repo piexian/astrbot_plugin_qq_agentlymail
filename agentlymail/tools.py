@@ -300,11 +300,15 @@ def _whitelist_blocked(
 
 
 def _safe_filename(name: str) -> str:
-    """取文件名的安全形态，去掉目录部分并拒绝路径特殊值。"""
-    filename = Path(name).name
-    if filename in {"", ".", ".."}:
+    """取文件名的安全形态，去掉路径分隔符、控制字符与特殊路径值。"""
+    leaf = name.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join(
+        char for char in leaf if ord(char) >= 32 and ord(char) != 127
+    )
+    cleaned = cleaned.strip().strip(".").strip()
+    if not cleaned or cleaned in {".", ".."}:
         raise ValueError("附件文件名不合法")
-    return filename
+    return cleaned[:200]
 
 
 def _save_attachment(message_id: str, filename: str, content: bytes) -> Path:
@@ -322,23 +326,39 @@ def _save_attachment(message_id: str, filename: str, content: bytes) -> Path:
 
 
 def _load_attachments(paths: list[str]) -> list[dict[str, Any]]:
-    """读取本地附件文件并组装协议上传字段，超限直接抛错。"""
+    """仅从 AstrBot 临时目录读取本地附件并组装协议上传字段，越界或超限直接抛错。"""
     if len(paths) > MAX_ATTACHMENT_COUNT:
         raise ValueError(f"附件数量超过上限 {MAX_ATTACHMENT_COUNT} 个")
+    allowed_root = Path(get_astrbot_temp_path()).resolve()
     attachments: list[dict[str, Any]] = []
     total = 0
     for path_text in paths:
-        path = Path(path_text)
-        content = path.read_bytes()
+        if not path_text or "\x00" in path_text:
+            raise ValueError("附件路径不合法")
+        try:
+            resolved = Path(path_text).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"附件文件不存在或不可访问：{Path(path_text).name}") from exc
+        if not resolved.is_relative_to(allowed_root):
+            raise ValueError("仅允许附加 AstrBot 临时目录内的文件")
+        if not resolved.is_file():
+            raise ValueError(f"附件路径不是普通文件：{resolved.name}")
+        size = resolved.stat().st_size
+        if size > MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"附件 {resolved.name} 超过单附件 20MB 上限")
+        if total + size > MAX_TOTAL_ATTACHMENT_BYTES:
+            raise ValueError("附件总量超过 20MB 上限")
+        content = resolved.read_bytes()
         if len(content) > MAX_ATTACHMENT_BYTES:
-            raise ValueError(f"附件 {path.name} 超过单附件 20MB 上限")
+            raise ValueError(f"附件 {resolved.name} 超过单附件 20MB 上限")
         total += len(content)
         if total > MAX_TOTAL_ATTACHMENT_BYTES:
             raise ValueError("附件总量超过 20MB 上限")
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        filename = _safe_filename(resolved.name)
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         attachments.append(
             {
-                "filename": path.name,
+                "filename": filename,
                 "content_type": content_type,
                 "size": len(content),
                 "sha1": hashlib.sha1(content).hexdigest(),
@@ -988,7 +1008,27 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        found, error = await self._plugin._stop_watch(event.unified_msg_origin)
+        umo = event.unified_msg_origin
+        if not event.is_admin():
+            watched_account = await self._plugin._watched_account_for(umo)
+            if watched_account is not None:
+                bindings = await self._plugin._load_bindings()
+                raw_bound = bindings.get(umo)
+                bound_account = (
+                    raw_bound.strip()
+                    if isinstance(raw_bound, str) and raw_bound.strip()
+                    else None
+                )
+                if watched_account != bound_account:
+                    logger.warning(
+                        f"[agently] 工具跨账号停止监听拒绝：监听账号={watched_account}，"
+                        f"会话已绑定={bound_account is not None}"
+                    )
+                    return error_result(
+                        "权限不足",
+                        "非管理员只能停止当前会话已绑定账号的新邮件监听。",
+                    )
+        found, error = await self._plugin._stop_watch(umo)
         if error is not None:
             return error_result(error)
         if not found:

@@ -1,8 +1,19 @@
-"""把协议模型渲染为可读文本，正文一律围栏隔离防注入。"""
+"""把协议模型渲染为可读文本，正文围栏隔离且元数据单行清洗防注入。"""
 
 from __future__ import annotations
 
 from .models import Message, MessageSummary, Page
+
+MAX_METADATA_CHARS = 300
+
+
+def _clean_inline(value: str, max_chars: int = MAX_METADATA_CHARS) -> str:
+    """把单行元数据中的换行与控制字符折叠为空格，防止突破字段边界注入提示词。"""
+    cleaned = "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in value)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > max_chars:
+        return cleaned[: max_chars - 1] + "…"
+    return cleaned
 
 
 def fence_body(body: str) -> str:
@@ -22,9 +33,12 @@ def fence_body(body: str) -> str:
 def _sender_text(sender) -> str:
     if sender is None:
         return "（无）"
+    email = _clean_inline(sender.email)
     if sender.name:
-        return f"{sender.name} <{sender.email}>"
-    return sender.email
+        name = _clean_inline(sender.name)
+        if name:
+            return f"{name} <{email}>"
+    return email or "（无）"
 
 
 def _read_flag(summary: MessageSummary) -> str:
@@ -40,10 +54,11 @@ def format_summary_list(page: Page[MessageSummary]) -> str:
     lines = []
     for item in page.data:
         sender = _sender_text(item.from_)
-        subject = item.subject or "（无主题）"
-        created = item.created_at or "时间未知"
+        subject = _clean_inline(item.subject) if item.subject else "（无主题）"
+        created = _clean_inline(item.created_at) if item.created_at else "时间未知"
+        message_id = _clean_inline(item.message_id)
         lines.append(
-            f"- {item.message_id}｜发件人 {sender}｜主题 {subject}"
+            f"- {message_id}｜发件人 {sender}｜主题 {subject}"
             f"｜{created}{_read_flag(item)}"
         )
     if not lines:
@@ -57,14 +72,18 @@ def format_message(message: Message, max_chars: int) -> str:
     truncated = len(body) > max_chars
     if truncated:
         body = body[:max_chars]
+    subject = _clean_inline(message.subject) if message.subject else "（无主题）"
+    created = _clean_inline(message.created_at) if message.created_at else "未知"
+    body_format = _clean_inline(message.body_format)
+    message_id = _clean_inline(message.message_id)
     lines = [
-        f"message_id：{message.message_id}",
-        f"主题：{message.subject or '（无主题）'}",
+        f"message_id：{message_id}",
+        f"主题：{subject}",
         f"发件人：{_sender_text(message.from_)}",
         f"收件人：{', '.join(_sender_text(s) for s in message.to) or '（无）'}",
         f"抄送：{', '.join(_sender_text(s) for s in message.cc) or '（无）'}",
-        f"时间：{message.created_at or '未知'}",
-        f"正文格式：{message.body_format}",
+        f"时间：{created}",
+        f"正文格式：{body_format}",
     ]
     if truncated:
         lines.append(f"（正文超过 {max_chars} 字符，已截断）")
@@ -72,9 +91,21 @@ def format_message(message: Message, max_chars: int) -> str:
     if message.attachments:
         lines.append("附件：")
         for attachment in message.attachments:
-            attachment_id = attachment.attachment_id or "（无 attachment_id）"
-            filename = attachment.filename or "（无文件名）"
-            content_type = attachment.content_type or "未知类型"
+            attachment_id = (
+                _clean_inline(attachment.attachment_id)
+                if attachment.attachment_id
+                else "（无 attachment_id）"
+            )
+            filename = (
+                _clean_inline(attachment.filename)
+                if attachment.filename
+                else "（无文件名）"
+            )
+            content_type = (
+                _clean_inline(attachment.content_type)
+                if attachment.content_type
+                else "未知类型"
+            )
             size = attachment.size if attachment.size is not None else "未知"
             lines.append(
                 f"- {attachment_id}｜{filename}｜{content_type}｜{size} 字节"
@@ -85,10 +116,11 @@ def format_message(message: Message, max_chars: int) -> str:
 def format_new_mail_notice(message: Message) -> str:
     """新邮件推送到会话的简版通知文本。"""
     sender = _sender_text(message.from_)
-    subject = message.subject or "（无主题）"
-    created = message.created_at or "未知时间"
+    subject = _clean_inline(message.subject) if message.subject else "（无主题）"
+    created = _clean_inline(message.created_at) if message.created_at else "未知时间"
+    message_id = _clean_inline(message.message_id)
     return (
         f"收到新邮件：发件人 {sender}，主题 {subject}，时间 {created}。\n"
-        f"message_id：{message.message_id}\n"
+        f"message_id：{message_id}\n"
         "可让我读取这封邮件查看全文。"
     )
