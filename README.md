@@ -25,5 +25,5 @@ QQ Agently Mail 插件直连 `agent.qq.com`，提供 LLM 工具与 WebUI，目�
 
 新邮件监听按会话保存账号、地址、事件游标和去重记录，插件重启后自动恢复；`watch_stop` 同时停止任务并清理配置。
 
-配置项：`tools_enabled`（默认开启，关闭则不注册工具）、`mail_send_whitelist`（收件人白名单，留空不限）。
+配置项：`mail_send_whitelist`（收件人白名单，留空不限）。LLM 工具由 AstrBot 工具管理统一启停。
 凭证保存于 `data/plugin_data/astrbot_plugin_qq_agentlymail/`（0600 权限，按账号一个文件）。

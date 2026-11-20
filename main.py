@@ -94,8 +94,7 @@ class QQAgentlyMailPlugin(Star):
 
     async def initialize(self):
         """注册工具与 Web API，并恢复已持久化的新邮件监听。"""
-        if self._config.get("tools_enabled", True):
-            self.context.add_llm_tools(*make_tools(self))
+        self.context.add_llm_tools(*make_tools(self))
         self._web_api = register_web_apis(self)
         try:
             await self._restore_watches()

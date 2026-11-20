@@ -1,10 +1,4 @@
 {
-  "tools_enabled": {
-    "description": "启用 LLM 邮件工具",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后注册 agently_mail_read、agently_mail_send、agently_mail_admin 三个函数工具，供管理员在 WebUI 工具管理里统一启停。"
-  },
   "mail_send_whitelist": {
     "description": "发件收件人白名单",
     "type": "list",
