@@ -1,16 +1,18 @@
 <script setup lang="ts">
+import { useI18n } from "../composables/useHostContext";
 import type { Alias } from "../types/mail";
 import DialogShell from "./DialogShell.vue";
 
 defineProps<{ open: boolean; alias: Alias | null; accountName: string; loading: boolean }>();
 const emit = defineEmits<{ close: []; confirm: [] }>();
+const { t } = useI18n();
 </script>
 
 <template>
   <DialogShell
     :open="open"
-    title="注销邮箱地址"
-    :subtitle="`${accountName} · 不可恢复操作`"
+    :title="t('deleteAliasDialog.title')"
+    :subtitle="t('deleteAliasDialog.subtitle', { account: accountName })"
     dialog-class="small-dialog"
     footer-end
     @close="emit('close')"
@@ -18,16 +20,18 @@ const emit = defineEmits<{ close: []; confirm: [] }>();
     <div class="dialog-body">
       <strong>{{ alias?.email ?? alias?.alias_id }}</strong>
       <ul class="risk-list">
-        <li>该地址下的全部邮件将被删除，无法恢复。</li>
-        <li>绑定该地址的 Agent 将被解绑。</li>
-        <li>地址进入 90 天保留期，期内新建地址会复用该邮箱。</li>
+        <li>{{ t("deleteAliasDialog.riskDeleteMails") }}</li>
+        <li>{{ t("deleteAliasDialog.riskUnbindAgent") }}</li>
+        <li>{{ t("deleteAliasDialog.riskRetention") }}</li>
       </ul>
-      <p class="confirm-note">确认后将在真实服务上注销该地址。</p>
+      <p class="confirm-note">{{ t("deleteAliasDialog.confirmNote") }}</p>
     </div>
     <template #footer>
-      <button class="button secondary" :disabled="loading" @click="emit('close')">取消</button>
+      <button class="button secondary" :disabled="loading" @click="emit('close')">
+        {{ t("deleteAliasDialog.cancel") }}
+      </button>
       <button class="button danger" :disabled="loading" @click="emit('confirm')">
-        {{ loading ? "注销中…" : "确认注销" }}
+        {{ loading ? t("deleteAliasDialog.deleting") : t("deleteAliasDialog.confirm") }}
       </button>
     </template>
   </DialogShell>

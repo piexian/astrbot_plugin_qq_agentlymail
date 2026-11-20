@@ -3,9 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f7fa" />
-    <meta name="description" content="QQ Agently Mail 多账号个人邮箱" />
-    <title>QQ Agently Mail</title>
+    <meta name="theme-color" content="#f3f5f8" />
+    <meta name="description" content="QQ Agently Mail" />
+    <title>邮局</title>
+    <script>
+      (() => {
+        const theme = new URLSearchParams(window.location.search).get("theme");
+        if (theme === "dark" || theme === "light") {
+          document.documentElement.setAttribute("data-theme", theme);
+          const meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", theme === "dark" ? "#11161d" : "#f3f5f8");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

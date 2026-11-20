@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, useTemplateRef, watch } from "vue";
 import type { ComposeAttachment, ComposeMode } from "../composables/useCompose";
+import { useI18n } from "../composables/useHostContext";
 import type { Alias, Attachment, BodyFormat } from "../types/mail";
 import { formatBytes } from "../utils/format";
 import SvgIcon from "./SvgIcon.vue";
@@ -31,9 +32,14 @@ const dialogRef = useTemplateRef<HTMLDialogElement>("dialog");
 const toInput = useTemplateRef<HTMLInputElement>("to");
 const bodyInput = useTemplateRef<HTMLTextAreaElement>("body");
 const fileInput = useTemplateRef<HTMLInputElement>("file");
+const { t } = useI18n();
 
 const title = computed(() =>
-  props.mode === "reply" ? "回复邮件" : props.mode === "forward" ? "转发邮件" : "新邮件",
+  props.mode === "reply"
+    ? t("compose.titleReply")
+    : props.mode === "forward"
+      ? t("compose.titleForward")
+      : t("compose.titleNew"),
 );
 const canAttach = computed(() => props.mode === "new");
 
@@ -72,13 +78,18 @@ function onFilesChanged(event: Event) {
     <form @submit.prevent="emit('submit')">
       <div class="compose-header">
         <h2>{{ title }}</h2>
-        <button type="button" class="icon-button" aria-label="关闭写邮件" @click="emit('close')">
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('compose.close')"
+          @click="emit('close')"
+        >
           <SvgIcon name="close" />
         </button>
       </div>
       <div class="compose-fields">
         <label
-          ><span>发件人</span
+          ><span>{{ t("compose.from") }}</span
           ><select v-model="fromAliasId" required>
             <option v-for="alias in aliases" :key="alias.alias_id" :value="alias.alias_id">
               {{ alias.email }}
@@ -86,7 +97,7 @@ function onFilesChanged(event: Event) {
           </select></label
         >
         <label
-          ><span>收件人</span
+          ><span>{{ t("compose.to") }}</span
           ><input
             ref="to"
             v-model="to"
@@ -96,17 +107,26 @@ function onFilesChanged(event: Event) {
             autocomplete="off"
         /></label>
         <label
-          ><span>抄送</span><input v-model="cc" type="email" placeholder="可选" autocomplete="off"
+          ><span>{{ t("compose.cc") }}</span
+          ><input
+            v-model="cc"
+            type="email"
+            :placeholder="t('compose.ccPlaceholder')"
+            autocomplete="off"
         /></label>
         <label
-          ><span>主题</span
-          ><input v-model="subject" required maxlength="200" placeholder="邮件主题"
+          ><span>{{ t("compose.subject") }}</span
+          ><input
+            v-model="subject"
+            required
+            maxlength="200"
+            :placeholder="t('compose.subjectPlaceholder')"
         /></label>
       </div>
       <div class="compose-tools">
-        <span>正文</span>
-        <select v-model="format" aria-label="正文格式">
-          <option value="PLAIN">纯文本</option>
+        <span>{{ t("compose.bodyLabel") }}</span>
+        <select v-model="format" :aria-label="t('compose.bodyFormat')">
+          <option value="PLAIN">{{ t("compose.formatPlain") }}</option>
           <option value="MARKDOWN">Markdown</option>
           <option value="HTML">HTML</option>
         </select>
@@ -114,7 +134,7 @@ function onFilesChanged(event: Event) {
           v-if="canAttach"
           type="button"
           class="icon-button"
-          aria-label="添加附件"
+          :aria-label="t('compose.addAttachment')"
           :disabled="sending"
           @click="fileInput?.click()"
         >
@@ -127,7 +147,7 @@ function onFilesChanged(event: Event) {
         v-model="body"
         class="compose-body"
         required
-        placeholder="写下邮件内容……"
+        :placeholder="t('compose.bodyPlaceholder')"
       ></textarea>
       <div v-if="mode === 'new'" class="attachment-list">
         <span v-for="file in attachments" :key="file.key" class="attachment-chip">
@@ -136,7 +156,7 @@ function onFilesChanged(event: Event) {
           >
           <button
             type="button"
-            :aria-label="`移除附件 ${file.filename}`"
+            :aria-label="t('compose.removeAttachment', { filename: file.filename })"
             :disabled="sending"
             @click="emit('removeAttachment', file.key)"
           >
@@ -156,9 +176,9 @@ function onFilesChanged(event: Event) {
         </span>
       </div>
       <div class="compose-footer">
-        <span v-if="mode === 'new'">单附件 20 MB，总计 20 MB</span>
-        <span v-else-if="mode === 'forward'">原附件由服务端携带</span>
-        <span v-else>回复不携带附件</span>
+        <span v-if="mode === 'new'">{{ t("compose.footerNew") }}</span>
+        <span v-else-if="mode === 'forward'">{{ t("compose.footerForward") }}</span>
+        <span v-else>{{ t("compose.footerReply") }}</span>
         <div>
           <button
             v-if="mode === 'new'"
@@ -167,10 +187,10 @@ function onFilesChanged(event: Event) {
             :disabled="sending"
             @click="emit('saveDraft')"
           >
-            保存草稿
+            {{ t("compose.saveDraft") }}
           </button>
           <button class="button primary" type="submit" :disabled="sending">
-            <SvgIcon name="send" />{{ sending ? "发送中…" : "发送邮件" }}
+            <SvgIcon name="send" />{{ sending ? t("compose.sending") : t("compose.send") }}
           </button>
         </div>
       </div>

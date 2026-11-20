@@ -15,6 +15,7 @@ import type {
   OutboundAttachment,
 } from "../types/mail";
 import { errorMessage } from "../utils/error";
+import { t } from "./useHostContext";
 import type { Notify } from "./useToasts";
 
 export type ComposeMode = "new" | "reply" | "forward";
@@ -60,13 +61,13 @@ function fileToBase64(file: File): Promise<string> {
     reader.onload = () => {
       const result = reader.result;
       if (typeof result !== "string") {
-        reject(new Error("附件读取失败"));
+        reject(new Error(t("compose.attachmentReadError")));
         return;
       }
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
-    reader.onerror = () => reject(new Error("附件读取失败"));
+    reader.onerror = () => reject(new Error(t("compose.attachmentReadError")));
     reader.readAsDataURL(file);
   });
 }
@@ -94,7 +95,12 @@ export function useCompose(deps: ComposeDeps) {
   let attachmentSeq = 0;
 
   // 后端写超时文案含“结果未知”；此时须先检查已发送，用户明确确认后才允许再次提交。
-  const resultUnknown = computed(() => sendError.value?.includes("结果未知") ?? false);
+  const resultUnknown = computed(
+    () =>
+      (sendError.value?.includes("结果未知") ||
+        sendError.value?.toLowerCase().includes("unknown")) ??
+      false,
+  );
 
   function draftKey(aliasId: string) {
     return `${deps.getAccount()?.account ?? ""}:${aliasId}`;
@@ -105,11 +111,11 @@ export function useCompose(deps: ComposeDeps) {
     if (!account) return;
     const message = deps.getSelectedMessage();
     if (nextMode !== "new" && !message) {
-      deps.notify("请先选择一封邮件");
+      deps.notify(t("compose.selectMessageFirst"));
       return;
     }
     if (nextMode === "new" && account.aliases.length === 0) {
-      deps.notify("当前账号暂无邮箱地址，请先在地址管理中新建");
+      deps.notify(t("compose.noAliasToCompose"));
       return;
     }
     mode.value = nextMode;
@@ -135,7 +141,7 @@ export function useCompose(deps: ComposeDeps) {
       form.to = message.from_?.email ?? "";
       const subject = message.subject ?? "";
       form.subject = /^Re:/i.test(subject) ? subject : `Re: ${subject}`;
-      form.body = `\n\n---- 原始邮件 ----\n${message.from_?.name ?? message.from_?.email ?? ""}：\n${message.body}`;
+      form.body = `\n\n${t("compose.replyDivider")}\n${message.from_?.name ?? message.from_?.email ?? ""}：\n${message.body}`;
     } else if (nextMode === "forward" && message) {
       replyForwardRef.value = {
         account: account.account,
@@ -144,7 +150,7 @@ export function useCompose(deps: ComposeDeps) {
       };
       const subject = message.subject ?? "";
       form.subject = /^Fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
-      form.body = `\n\n---- 转发邮件 ----\n发件人：${message.from_?.email ?? ""}\n\n${message.body}`;
+      form.body = `\n\n${t("compose.forwardDivider")}\n${t("compose.forwardSenderPrefix")}${message.from_?.email ?? ""}\n\n${message.body}`;
       forwardAttachments.value = message.attachments.map((file) => ({ ...file }));
     } else {
       const saved = drafts[draftKey(form.fromAliasId)];
@@ -175,15 +181,15 @@ export function useCompose(deps: ComposeDeps) {
     }));
     const combined = [...attachments.value, ...incoming];
     if (combined.length > ATTACHMENT_MAX_COUNT) {
-      deps.notify(`一封邮件最多添加 ${ATTACHMENT_MAX_COUNT} 个附件`);
+      deps.notify(t("compose.maxAttachments", { max: ATTACHMENT_MAX_COUNT }));
       return;
     }
     if (combined.some((file) => file.size > ATTACHMENT_MAX_BYTES)) {
-      deps.notify("单个附件不能超过 20 MB");
+      deps.notify(t("compose.maxSingleAttachment"));
       return;
     }
     if (combined.reduce((sum, file) => sum + file.size, 0) > ATTACHMENT_MAX_BYTES) {
-      deps.notify("附件总大小不能超过 20 MB");
+      deps.notify(t("compose.maxTotalAttachments"));
       return;
     }
     attachments.value = combined;
@@ -205,7 +211,7 @@ export function useCompose(deps: ComposeDeps) {
       attachments: attachments.value.map((file) => ({ ...file })),
     };
     open.value = false;
-    deps.notify("草稿已保存在本次会话中");
+    deps.notify(t("compose.draftSaved"));
   }
 
   function submit() {
@@ -216,11 +222,11 @@ export function useCompose(deps: ComposeDeps) {
     const subject = form.subject.trim();
     const body = form.body.trim();
     if (!alias || !to || !subject || !body) {
-      deps.notify("请填写收件人、主题和正文");
+      deps.notify(t("compose.missingRequired"));
       return;
     }
     if (mode.value !== "new" && !replyForwardRef.value) {
-      deps.notify("缺少原始邮件，请重新选择");
+      deps.notify(t("compose.missingOriginal"));
       return;
     }
     const attachmentCount =
@@ -254,7 +260,7 @@ export function useCompose(deps: ComposeDeps) {
       let localRecorded = true;
       if (mode.value === "new") {
         const alias = account.aliases.find((item) => item.alias_id === form.fromAliasId);
-        if (!alias) throw new Error("发件地址不存在");
+        if (!alias) throw new Error(t("compose.fromMissing"));
         const outbound: OutboundAttachment[] = await Promise.all(
           attachments.value.map(async (file) => ({
             filename: file.filename,
@@ -297,8 +303,8 @@ export function useCompose(deps: ComposeDeps) {
       pendingSend.value = null;
       confirmOpen.value = false;
       open.value = false;
-      deps.notify("邮件已发送");
-      if (!localRecorded) deps.notify("本地发信计数未记录，不影响发送结果");
+      deps.notify(t("compose.sentToast"));
+      if (!localRecorded) deps.notify(t("compose.localCountFailed"));
       deps.onSent();
     } catch (cause) {
       // 写失败不自动重试；保留草稿与确认弹层，结果未知时引导先检查已发送。

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "../composables/useHostContext";
 import type { Alias, DisplayAccount, FolderId, MailFilter, MessageSummary } from "../types/mail";
-import { FOLDER_NAMES } from "../types/mail";
+import { accountStatusLabel, folderLabel } from "../utils/display";
 import { timeLabel } from "../utils/format";
 import SvgIcon from "./SvgIcon.vue";
 
@@ -25,30 +26,34 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectMessage: [messageId: string];
   openAccount: [];
+  openLogin: [accountId?: string];
   compose: [];
   loadMore: [];
   retry: [];
   retryAccounts: [];
 }>();
 const filter = defineModel<MailFilter>("filter", { required: true });
+const { t, locale } = useI18n();
 
 const filters = computed(() => [
-  { id: "all" as MailFilter, label: "全部", disabled: false, title: "" },
+  { id: "all" as MailFilter, label: t("list.filterAll"), disabled: false, title: "" },
   {
     id: "unread" as MailFilter,
-    label: "未读",
+    label: t("list.filterUnread"),
     disabled: props.searchMode,
-    title: props.searchMode ? "搜索时不支持未读筛选" : "",
+    title: props.searchMode ? t("list.filterUnreadDisabledTitle") : "",
   },
   {
     id: "attachment" as MailFilter,
-    label: "有附件",
+    label: t("list.filterAttachment"),
     disabled: true,
-    title: "列表不含附件信息，无法按附件筛选",
+    title: t("list.filterAttachmentTitle"),
   },
 ]);
 
-const title = computed(() => (props.searchMode ? "搜索结果" : FOLDER_NAMES[props.folder]));
+const title = computed(() =>
+  props.searchMode ? t("list.searchResults") : folderLabel(props.folder),
+);
 
 const paneState = computed(() => {
   if (props.accountsLoading) return "accounts-loading";
@@ -62,9 +67,11 @@ const paneState = computed(() => {
   return "list";
 });
 
-const emptyTitle = computed(() => (props.searchMode ? "没有匹配的邮件" : "这里没有邮件"));
+const emptyTitle = computed(() =>
+  props.searchMode ? t("list.emptySearchTitle") : t("list.emptyTitle"),
+);
 const emptyText = computed(() =>
-  props.searchMode ? "换个关键词试试。" : "切换文件夹或调整筛选条件。",
+  props.searchMode ? t("list.emptySearchText") : t("list.emptyText"),
 );
 </script>
 
@@ -73,7 +80,7 @@ const emptyText = computed(() =>
     <div class="mobile-account-row mobile-only">
       <button @click="emit('openAccount')">
         <span class="avatar small" :data-tone="account?.tone">{{ account?.initials }}</span>
-        <span>{{ alias?.email ?? "暂无邮箱地址" }}</span>
+        <span>{{ alias?.email ?? t("sidebar.noAddress") }}</span>
         <SvgIcon name="chevron" />
       </button>
     </div>
@@ -87,10 +94,10 @@ const emptyText = computed(() =>
         :disabled="composeDisabled"
         @click="emit('compose')"
       >
-        写邮件
+        {{ t("topbar.compose") }}
       </button>
     </div>
-    <div class="list-filters" role="group" aria-label="邮件筛选">
+    <div class="list-filters" role="group" :aria-label="t('list.filterGroup')">
       <button
         v-for="item in filters"
         :key="item.id"
@@ -104,41 +111,61 @@ const emptyText = computed(() =>
       </button>
     </div>
     <p v-if="searchMode" class="field-hint filter-hint">
-      搜索范围为当前地址的全部邮件，暂不支持筛选。
+      {{ t("list.searchHint") }}
     </p>
-    <p v-else class="field-hint filter-hint">列表不含附件信息，“有附件”筛选不可用。</p>
+    <p v-else class="field-hint filter-hint">{{ t("list.attachmentHint") }}</p>
 
-    <div class="message-list" aria-label="邮件列表">
+    <div class="message-list" :aria-label="t('list.ariaLabel')">
       <div v-if="paneState === 'accounts-loading'" class="empty-list">
-        <SvgIcon name="refresh" /><strong>正在加载账号…</strong>
+        <SvgIcon name="refresh" /><strong>{{ t("list.loadingAccounts") }}</strong>
       </div>
       <div v-else-if="paneState === 'accounts-error'" class="empty-list">
-        <SvgIcon name="mail" /><strong>账号加载失败</strong>
+        <SvgIcon name="mail" /><strong>{{ t("list.accountsErrorTitle") }}</strong>
         <p>{{ accountsError }}</p>
-        <button class="button secondary" @click="emit('retryAccounts')">重试</button>
+        <button class="button secondary" @click="emit('retryAccounts')">
+          {{ t("list.retry") }}
+        </button>
       </div>
       <div v-else-if="paneState === 'no-accounts'" class="empty-list">
-        <SvgIcon name="mail" /><strong>还没有邮箱账号</strong>
-        <p>请在聊天中执行 /agently login 添加账号。</p>
-        <button class="button secondary" @click="emit('openAccount')">查看账号</button>
+        <SvgIcon name="mail" /><strong>{{ t("list.noAccountsTitle") }}</strong>
+        <p>{{ t("list.noAccountsHint") }}</p>
+        <div class="empty-actions">
+          <button class="button primary" @click="emit('openLogin', 'default')">
+            {{ t("login.title") }}
+          </button>
+          <button class="button secondary" @click="emit('openAccount')">
+            {{ t("list.viewAccounts") }}
+          </button>
+        </div>
       </div>
       <div v-else-if="paneState === 'account-invalid'" class="empty-list">
-        <SvgIcon name="mail" /><strong>{{ account?.statusLabel }}</strong>
-        <p>{{ account?.error ?? "该账号当前不可用。" }}</p>
-        <button class="button secondary" @click="emit('openAccount')">切换账号</button>
+        <SvgIcon name="mail" /><strong>{{
+          account ? accountStatusLabel(account.status) : ""
+        }}</strong>
+        <p>{{ account?.error ?? t("list.accountUnavailable") }}</p>
+        <div class="empty-actions">
+          <button class="button primary" @click="emit('openLogin', account?.account)">
+            {{ t("accountDialog.relogin") }}
+          </button>
+          <button class="button secondary" @click="emit('openAccount')">
+            {{ t("list.switchAccount") }}
+          </button>
+        </div>
       </div>
       <div v-else-if="paneState === 'no-alias'" class="empty-list">
-        <SvgIcon name="mail" /><strong>暂无邮箱地址</strong>
-        <p>打开账号切换，在地址管理中新建地址。</p>
-        <button class="button secondary" @click="emit('openAccount')">管理地址</button>
+        <SvgIcon name="mail" /><strong>{{ t("sidebar.noAddress") }}</strong>
+        <p>{{ t("list.noAliasHint") }}</p>
+        <button class="button secondary" @click="emit('openAccount')">
+          {{ t("list.manageAddresses") }}
+        </button>
       </div>
       <div v-else-if="paneState === 'list-loading'" class="empty-list">
-        <SvgIcon name="refresh" /><strong>正在加载邮件…</strong>
+        <SvgIcon name="refresh" /><strong>{{ t("list.loadingMessages") }}</strong>
       </div>
       <div v-else-if="paneState === 'list-error'" class="empty-list">
-        <SvgIcon name="mail" /><strong>邮件加载失败</strong>
+        <SvgIcon name="mail" /><strong>{{ t("list.listErrorTitle") }}</strong>
         <p>{{ error }}</p>
-        <button class="button secondary" @click="emit('retry')">重试</button>
+        <button class="button secondary" @click="emit('retry')">{{ t("list.retry") }}</button>
       </div>
       <div v-else-if="paneState === 'empty'" class="empty-list">
         <SvgIcon name="mail" /><strong>{{ emptyTitle }}</strong>
@@ -147,7 +174,7 @@ const emptyText = computed(() =>
       <template v-else>
         <p v-if="error" class="list-error-banner" role="alert">
           {{ error }}
-          <button class="button secondary" @click="emit('retry')">重试</button>
+          <button class="button secondary" @click="emit('retry')">{{ t("list.retry") }}</button>
         </p>
         <button
           v-for="message in messages"
@@ -160,7 +187,7 @@ const emptyText = computed(() =>
             <span class="unread-dot" :class="{ placeholder: message.is_read }"></span>
             <span class="message-sender">{{ message.from_?.name ?? message.from_?.email }}</span>
             <span class="message-time">{{
-              message.created_at ? timeLabel(message.created_at) : ""
+              message.created_at ? timeLabel(message.created_at, locale) : ""
             }}</span>
           </span>
           <span class="message-subject">{{ message.subject }}</span>
@@ -176,9 +203,9 @@ const emptyText = computed(() =>
         :disabled="loadingMore"
         @click="emit('loadMore')"
       >
-        {{ loadingMore ? "加载中…" : "加载更多" }}
+        {{ loadingMore ? t("list.loadingMore") : t("list.loadMore") }}
       </button>
-      <span v-else-if="paneState === 'list'">没有更多了</span>
+      <span v-else-if="paneState === 'list'">{{ t("list.noMore") }}</span>
     </div>
   </main>
 </template>

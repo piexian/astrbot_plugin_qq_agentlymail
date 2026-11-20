@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "../composables/useHostContext";
 import type { Alias, DisplayAccount, FolderId, QuotaView } from "../types/mail";
 import SvgIcon from "./SvgIcon.vue";
 import FolderNav from "./FolderNav.vue";
@@ -14,15 +15,16 @@ defineProps<{
   composeDisabled: boolean;
 }>();
 const emit = defineEmits<{ openAccount: []; compose: []; selectFolder: [folder: FolderId] }>();
+const { t } = useI18n();
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ open }" aria-label="邮箱导航">
+  <aside class="sidebar" :class="{ open }" :aria-label="t('sidebar.navLabel')">
     <button class="account-trigger" aria-haspopup="dialog" @click="emit('openAccount')">
       <span class="avatar" :data-tone="account?.tone">{{ account?.initials }}</span>
       <span class="account-copy"
         ><strong>{{ account?.name }}</strong
-        ><span>{{ alias?.email ?? "暂无邮箱地址" }}</span></span
+        ><span>{{ alias?.email ?? t("sidebar.noAddress") }}</span></span
       >
       <SvgIcon name="chevron" />
     </button>
@@ -31,7 +33,7 @@ const emit = defineEmits<{ openAccount: []; compose: []; selectFolder: [folder: 
       :disabled="composeDisabled"
       @click="emit('compose')"
     >
-      <SvgIcon name="compose" />写邮件
+      <SvgIcon name="compose" />{{ t("topbar.compose") }}
     </button>
     <FolderNav
       :folder="folder"

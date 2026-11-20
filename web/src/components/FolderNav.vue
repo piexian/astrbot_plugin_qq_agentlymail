@@ -1,21 +1,25 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { useI18n } from "../composables/useHostContext";
 import type { FolderId } from "../types/mail";
+import { folderLabel } from "../utils/display";
 import SvgIcon from "./SvgIcon.vue";
 
 defineProps<{ folder: FolderId; inboxUnread: number }>();
 const emit = defineEmits<{ select: [folder: FolderId] }>();
+const { t } = useI18n();
 
-const folders: { id: FolderId; label: string; icon: string }[] = [
-  { id: "inbox", label: "收件箱", icon: "inbox" },
-  { id: "sent", label: "已发送", icon: "send" },
-  { id: "spam", label: "垃圾邮件", icon: "spam" },
-  { id: "trash", label: "垃圾箱", icon: "trash" },
-];
+const folders = computed<{ id: FolderId; label: string; icon: string }[]>(() => [
+  { id: "inbox", label: folderLabel("inbox"), icon: "inbox" },
+  { id: "sent", label: folderLabel("sent"), icon: "send" },
+  { id: "spam", label: folderLabel("spam"), icon: "spam" },
+  { id: "trash", label: folderLabel("trash"), icon: "trash" },
+]);
 </script>
 
 <template>
-  <nav class="folder-nav" aria-label="邮件文件夹">
-    <p class="nav-label">邮件</p>
+  <nav class="folder-nav" :aria-label="t('folder.navLabel')">
+    <p class="nav-label">{{ t("folder.sectionTitle") }}</p>
     <button
       v-for="item in folders"
       :key="item.id"

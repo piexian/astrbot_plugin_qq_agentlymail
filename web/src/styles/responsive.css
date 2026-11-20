@@ -27,7 +27,7 @@
     width: 250px;
     transform: translateX(-102%);
     transition: transform 180ms ease-out;
-    box-shadow: 12px 0 34px rgba(31, 45, 61, 0.12);
+    box-shadow: var(--sidebar-shadow);
   }
   .sidebar.open {
     transform: translateX(0);
@@ -39,7 +39,7 @@
     width: 100%;
     height: auto;
     border: 0;
-    background: rgba(22, 31, 42, 0.25);
+    background: var(--scrim);
   }
   .sidebar.open + .sidebar-scrim {
     display: block;
@@ -249,7 +249,8 @@
     padding-inline: 16px;
   }
   .compose-fields label {
-    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-columns: minmax(66px, auto) minmax(0, 1fr);
+    gap: 8px;
   }
   .compose-tools {
     padding-inline: 16px;

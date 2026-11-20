@@ -130,20 +130,12 @@ export type FolderId = "inbox" | "sent" | "spam" | "trash";
 export type MailFilter = "all" | "unread" | "attachment";
 export type BodyFormat = "PLAIN" | "MARKDOWN" | "HTML";
 
-export const FOLDER_NAMES: Record<FolderId, string> = {
-  inbox: "收件箱",
-  sent: "已发送",
-  spam: "垃圾邮件",
-  trash: "垃圾箱",
-};
-
 /** 账号展示装饰，由 account/email 本地派生，不来自服务端。 */
 export interface DisplayAccount extends AccountView {
   aliases: Alias[];
   name: string;
   initials: string;
   tone: Tone;
-  statusLabel: string;
 }
 
 export interface QuotaView {
@@ -152,4 +144,40 @@ export interface QuotaView {
   perHour: string;
   singleAttachment: string;
   totalAttachment: string;
+}
+
+export type LoginState =
+  | "waiting_scan"
+  | "scanned"
+  | "select_mail"
+  | "authorizing"
+  | "success"
+  | "expired"
+  | "cancelled"
+  | "error";
+
+export interface LoginMailOption {
+  email: string;
+  is_selected: boolean;
+}
+
+export interface WebLoginSession {
+  session_id: string;
+  account: string;
+  mode: "qr" | "browser";
+  state: LoginState;
+  qr_image: string | null;
+  qr_expired: boolean;
+  browser_url: string;
+  input_code: string;
+  expires_at: string;
+  mails: LoginMailOption[] | null;
+  email: string | null;
+  error: string | null;
+  error_code: string | null;
+}
+
+export interface LoginCancelResult {
+  cancelled: boolean;
+  session: WebLoginSession | null;
 }

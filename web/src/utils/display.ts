@@ -1,15 +1,35 @@
-/** 账号展示装饰：由 account/email 本地派生名称、首字母与色调。 */
+/** 账号展示装饰与多语言标签映射：由 account/email 本地派生名称、首字母与色调。 */
 
-import type { AccountStatus, AccountView, DisplayAccount, Tone } from "../types/mail";
+import { t } from "../composables/useHostContext";
+import type { AccountStatus, AccountView, DisplayAccount, FolderId, Tone } from "../types/mail";
 
 const TONES: Tone[] = ["blue", "green", "orange", "slate"];
 
-const STATUS_LABELS: Record<AccountStatus, string> = {
-  ok: "已授权",
-  invalid_credentials: "凭证无效",
-  auth_expired: "授权失效",
-  error: "读取失败",
-};
+export function accountStatusLabel(status: AccountStatus): string {
+  switch (status) {
+    case "ok":
+      return t("status.ok");
+    case "invalid_credentials":
+      return t("status.invalid_credentials");
+    case "auth_expired":
+      return t("status.auth_expired");
+    case "error":
+      return t("status.error");
+  }
+}
+
+export function folderLabel(folder: FolderId): string {
+  switch (folder) {
+    case "inbox":
+      return t("folder.inbox");
+    case "sent":
+      return t("folder.sent");
+    case "spam":
+      return t("folder.spam");
+    case "trash":
+      return t("folder.trash");
+  }
+}
 
 function toneOf(seed: string): Tone {
   let hash = 0;
@@ -25,7 +45,6 @@ export function decorateAccount(view: AccountView): DisplayAccount {
     name,
     initials: (name.trim()[0] ?? "?").toUpperCase(),
     tone: toneOf(name),
-    statusLabel: STATUS_LABELS[view.status],
   };
 }
 

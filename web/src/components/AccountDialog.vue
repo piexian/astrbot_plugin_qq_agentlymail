@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { useI18n } from "../composables/useHostContext";
 import type { DisplayAccount } from "../types/mail";
+import { accountStatusLabel } from "../utils/display";
 import DialogShell from "./DialogShell.vue";
 import SvgIcon from "./SvgIcon.vue";
 
@@ -14,14 +16,16 @@ const emit = defineEmits<{
   selectAddress: [accountId: string, aliasId: string];
   manage: [accountId: string];
   addAccount: [];
+  relogin: [accountId: string];
 }>();
+const { t } = useI18n();
 </script>
 
 <template>
   <DialogShell
     :open="open"
-    title="切换账号与邮箱"
-    subtitle="凭证按账号隔离，地址共享账号额度"
+    :title="t('accountDialog.title')"
+    :subtitle="t('accountDialog.subtitle')"
     dialog-class="account-dialog"
     @close="emit('close')"
   >
@@ -32,16 +36,25 @@ const emit = defineEmits<{
           <div>
             <strong>{{ account.name }}</strong
             ><span class="auth-status" :data-status="account.status">{{
-              account.statusLabel
+              accountStatusLabel(account.status)
             }}</span>
           </div>
-          <button
-            class="manage-mailboxes"
-            :disabled="account.status !== 'ok'"
-            @click="emit('manage', account.account)"
-          >
-            管理地址 · {{ account.aliases.length }} 个
-          </button>
+          <div class="account-actions">
+            <button
+              v-if="account.status !== 'ok'"
+              class="manage-mailboxes"
+              @click="emit('relogin', account.account)"
+            >
+              {{ t("accountDialog.relogin") }}
+            </button>
+            <button
+              class="manage-mailboxes"
+              :disabled="account.status !== 'ok'"
+              @click="emit('manage', account.account)"
+            >
+              {{ t("accountDialog.manageCount", { count: account.aliases.length }) }}
+            </button>
+          </div>
         </div>
         <p v-if="account.error" class="account-error">{{ account.error }}</p>
         <button
@@ -59,21 +72,23 @@ const emit = defineEmits<{
               name="check"
           /></span>
           <span class="address-text">{{ alias.email }}</span>
-          <span v-if="alias.is_primary" class="primary-tag">主地址</span>
+          <span v-if="alias.is_primary" class="primary-tag">{{
+            t("accountDialog.primaryTag")
+          }}</span>
         </button>
         <p v-if="account.aliases.length === 0" class="account-empty">
-          {{ account.status === "ok" ? "暂无邮箱地址" : "该账号当前不可用" }}
+          {{ account.status === "ok" ? t("sidebar.noAddress") : t("accountDialog.unavailable") }}
         </p>
       </section>
       <p v-if="accounts.length === 0" class="account-empty">
-        还没有邮箱账号，请在聊天中执行 /agently login 添加。
+        {{ t("accountDialog.empty") }}
       </p>
     </div>
     <template #footer>
       <button class="button secondary" @click="emit('addAccount')">
-        <SvgIcon name="plus" />添加账号
+        <SvgIcon name="plus" />{{ t("accountDialog.addAccount") }}
       </button>
-      <span>账号授权请在聊天中执行 /agently login</span>
+      <span>{{ t("accountDialog.footerHint") }}</span>
     </template>
   </DialogShell>
 </template>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { PendingSend } from "../composables/useCompose";
+import { useI18n } from "../composables/useHostContext";
 import DialogShell from "./DialogShell.vue";
 
 const props = defineProps<{
@@ -17,15 +18,18 @@ const emit = defineEmits<{
   acknowledgeRetry: [];
   checkSent: [];
 }>();
+const { t } = useI18n();
 
 const attachmentLabel = computed(() => {
-  if (!props.pending) return "无";
+  if (!props.pending) return t("confirmSend.attachmentsNone");
   if (props.pending.mode === "forward")
     return props.pending.attachmentCount
-      ? `${props.pending.attachmentCount} 个（服务端携带）`
-      : "无";
-  if (props.pending.mode === "reply") return "无";
-  return props.pending.attachmentCount ? `${props.pending.attachmentCount} 个` : "无";
+      ? t("confirmSend.attachmentsForwardCount", { count: props.pending.attachmentCount })
+      : t("confirmSend.attachmentsNone");
+  if (props.pending.mode === "reply") return t("confirmSend.attachmentsNone");
+  return props.pending.attachmentCount
+    ? t("confirmSend.attachmentsCount", { count: props.pending.attachmentCount })
+    : t("confirmSend.attachmentsNone");
 });
 const retryDisabled = computed(
   () => props.sending || (props.resultUnknown && !props.retryAcknowledged),
@@ -35,49 +39,59 @@ const retryDisabled = computed(
 <template>
   <DialogShell
     :open="open"
-    title="确认发送邮件"
-    subtitle="确认后将通过真实服务发送"
+    :title="t('confirmSend.title')"
+    :subtitle="t('confirmSend.subtitle')"
     dialog-class="small-dialog"
     footer-end
     @close="emit('close')"
   >
     <div v-if="pending" class="dialog-body">
       <dl class="confirm-summary">
-        <dt>发件人</dt>
+        <dt>{{ t("compose.from") }}</dt>
         <dd>{{ pending.from }}</dd>
-        <dt>收件人</dt>
+        <dt>{{ t("compose.to") }}</dt>
         <dd>{{ pending.to }}</dd>
-        <dt v-if="pending.cc">抄送</dt>
+        <dt v-if="pending.cc">{{ t("compose.cc") }}</dt>
         <dd v-if="pending.cc">{{ pending.cc }}</dd>
-        <dt>主题</dt>
+        <dt>{{ t("compose.subject") }}</dt>
         <dd>{{ pending.subject }}</dd>
-        <dt>附件</dt>
+        <dt>{{ t("confirmSend.attachments") }}</dt>
         <dd>{{ attachmentLabel }}</dd>
       </dl>
       <div v-if="error" class="send-error" role="alert">
         <p>{{ error }}</p>
         <template v-if="resultUnknown">
           <p class="confirm-note">
-            发送结果未知。请先检查已发送文件夹，确认邮件未送达后再决定是否重新发送，避免重复投递。
+            {{ t("confirmSend.resultUnknownNote") }}
           </p>
           <div class="send-error-actions">
-            <button class="button secondary" @click="emit('checkSent')">查看已发送</button>
+            <button class="button secondary" @click="emit('checkSent')">
+              {{ t("confirmSend.checkSent") }}
+            </button>
             <button
               class="button secondary ack-button"
               :class="{ active: retryAcknowledged }"
               @click="emit('acknowledgeRetry')"
             >
-              {{ retryAcknowledged ? "已确认需要重新发送" : "我已检查已发送，确认需要重新发送" }}
+              {{ retryAcknowledged ? t("confirmSend.ackedRetry") : t("confirmSend.ackRetry") }}
             </button>
           </div>
         </template>
       </div>
-      <p v-else class="confirm-note">确认后邮件将真实发送，请核对收件人与内容。</p>
+      <p v-else class="confirm-note">{{ t("confirmSend.confirmNote") }}</p>
     </div>
     <template #footer>
-      <button class="button secondary" :disabled="sending" @click="emit('close')">返回修改</button>
+      <button class="button secondary" :disabled="sending" @click="emit('close')">
+        {{ t("confirmSend.backToEdit") }}
+      </button>
       <button class="button primary" :disabled="retryDisabled" @click="emit('confirm')">
-        {{ sending ? "发送中…" : error ? "重新发送" : "确认发送" }}
+        {{
+          sending
+            ? t("compose.sending")
+            : error
+              ? t("confirmSend.resend")
+              : t("confirmSend.confirm")
+        }}
       </button>
     </template>
   </DialogShell>

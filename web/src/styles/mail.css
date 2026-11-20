@@ -61,7 +61,7 @@
 .global-search:focus-within {
   background: var(--surface);
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(23, 111, 209, 0.1);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .global-search input {
   width: 100%;
@@ -96,7 +96,7 @@
   min-height: 0;
   padding: 16px 12px 14px;
   border-right: 1px solid var(--line);
-  background: #f8fafc;
+  background: var(--surface-sidebar);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -177,11 +177,11 @@
 }
 .folder.active {
   background: var(--accent-soft);
-  color: #155fae;
+  color: var(--accent-ink);
   font-weight: 500;
 }
 .folder.active svg {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .folder-count {
   min-width: 22px;
@@ -391,7 +391,7 @@
   width: 34px;
   height: 34px;
   margin-bottom: 16px;
-  color: #9aabbd;
+  color: var(--empty-icon);
 }
 .empty-list strong {
   margin-bottom: 8px;
@@ -474,7 +474,7 @@
   margin-top: 26px;
   padding-top: 25px;
   border-top: 1px solid var(--line);
-  color: #33404e;
+  color: var(--mail-body);
   font-size: 15px;
   line-height: 1.9;
 }
@@ -552,7 +552,7 @@
 .reader-empty svg {
   width: 27px;
   height: 27px;
-  color: #8799ab;
+  color: var(--reader-empty-icon);
 }
 .reader-empty strong {
   margin-bottom: 8px;
@@ -576,8 +576,8 @@
   margin: 12px 16px 0;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
-  background: #fdecec;
-  color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-ink);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -617,7 +617,7 @@
 .init-card svg {
   width: 34px;
   height: 34px;
-  color: #9aabbd;
+  color: var(--empty-icon);
 }
 
 .init-card strong {

@@ -2,24 +2,99 @@
   color-scheme: light;
   --bg: #f3f5f8;
   --surface: #ffffff;
+  --surface-sidebar: #f8fafc;
   --surface-subtle: #f7f9fb;
   --surface-hover: #f0f4f8;
+  --compose-header: #f5f8fb;
   --ink: #202934;
   --ink-soft: #3c4856;
+  --mail-body: #33404e;
   --muted: #687586;
+  --placeholder: #8a96a5;
+  --empty-icon: #9aabbd;
+  --reader-empty-icon: #8799ab;
   --line: #e2e7ed;
   --line-strong: #cbd4df;
+  --line-hover: #aebdcc;
   --accent: #176fd1;
   --accent-hover: #125fb7;
   --accent-soft: #eaf3ff;
+  --accent-ink: #155fae;
+  --accent-ring: rgba(23, 111, 209, 0.14);
+  --confirm-note-ink: #3e5e81;
+  --selection: #cfe4fc;
+  --scrollbar: #c6cfda;
   --success: #18794e;
   --danger: #b44242;
+  --danger-hover: #9d3636;
+  --danger-ink: #b44242;
+  --danger-soft: #fdecec;
+  --toast-border: #c9d6e3;
+  --toast-shadow: 0 8px 30px rgba(31, 45, 61, 0.13);
+  --backdrop: rgba(22, 31, 42, 0.38);
+  --scrim: rgba(22, 31, 42, 0.25);
+  --sidebar-shadow: 12px 0 34px rgba(31, 45, 61, 0.12);
   --shadow: 0 18px 55px rgba(31, 45, 61, 0.16);
+  --avatar-blue-bg: #dcecff;
+  --avatar-blue-ink: #155da9;
+  --avatar-green-bg: #dcf2e8;
+  --avatar-green-ink: #237157;
+  --avatar-orange-bg: #fff0db;
+  --avatar-orange-ink: #98601c;
+  --avatar-slate-bg: #e7ecf1;
+  --avatar-slate-ink: #526577;
   --radius-sm: 7px;
   --radius-md: 10px;
   --radius-lg: 14px;
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #11161d;
+  --surface: #181e27;
+  --surface-sidebar: #141921;
+  --surface-subtle: #1f2733;
+  --surface-hover: #252f3d;
+  --compose-header: #1c2430;
+  --ink: #e7edf5;
+  --ink-soft: #cbd5e1;
+  --mail-body: #d3dce7;
+  --muted: #8f9eb2;
+  --placeholder: #6e7d91;
+  --empty-icon: #64748b;
+  --reader-empty-icon: #7a8ba0;
+  --line: #293342;
+  --line-strong: #39465a;
+  --line-hover: #4e6078;
+  --accent: #2478e5;
+  --accent-hover: #3687ef;
+  --accent-soft: rgba(54, 135, 239, 0.18);
+  --accent-ink: #82b8ff;
+  --accent-ring: rgba(54, 135, 239, 0.28);
+  --confirm-note-ink: #b8d7ff;
+  --selection: rgba(54, 135, 239, 0.34);
+  --scrollbar: #3a4659;
+  --success: #3fb984;
+  --danger: #d94c4c;
+  --danger-hover: #e35d5d;
+  --danger-ink: #ff8f8f;
+  --danger-soft: rgba(217, 76, 76, 0.16);
+  --toast-border: #364356;
+  --toast-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+  --backdrop: rgba(4, 8, 14, 0.64);
+  --scrim: rgba(4, 8, 14, 0.56);
+  --sidebar-shadow: 12px 0 36px rgba(0, 0, 0, 0.48);
+  --shadow: 0 22px 60px rgba(0, 0, 0, 0.52);
+  --avatar-blue-bg: rgba(54, 135, 239, 0.22);
+  --avatar-blue-ink: #8ec1ff;
+  --avatar-green-bg: rgba(63, 185, 132, 0.2);
+  --avatar-green-ink: #72e0ae;
+  --avatar-orange-bg: rgba(245, 166, 66, 0.2);
+  --avatar-orange-ink: #ffc678;
+  --avatar-slate-bg: rgba(148, 163, 184, 0.2);
+  --avatar-slate-ink: #c1cedc;
 }
 
 * {
@@ -59,9 +134,13 @@ select,
 textarea {
   color: var(--ink);
 }
+option {
+  background: var(--surface);
+  color: var(--ink);
+}
 input::placeholder,
 textarea::placeholder {
-  color: #8a96a5;
+  color: var(--placeholder);
 }
 h1,
 h2,
@@ -91,11 +170,11 @@ svg {
   outline-offset: 2px;
 }
 ::selection {
-  background: #cfe4fc;
+  background: var(--selection);
 }
 * {
   scrollbar-width: thin;
-  scrollbar-color: #c6cfda transparent;
+  scrollbar-color: var(--scrollbar) transparent;
 }
 
 .button {
@@ -129,7 +208,7 @@ svg {
 }
 .button.secondary:hover {
   background: var(--surface-hover);
-  border-color: #aebdcc;
+  border-color: var(--line-hover);
   transform: translateY(-1px);
 }
 .button:active {
@@ -165,8 +244,8 @@ svg {
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  background: #dcecff;
-  color: #155da9;
+  background: var(--avatar-blue-bg);
+  color: var(--avatar-blue-ink);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -180,16 +259,16 @@ svg {
   font-size: 13px;
 }
 .avatar[data-tone="green"] {
-  background: #dcf2e8;
-  color: #237157;
+  background: var(--avatar-green-bg);
+  color: var(--avatar-green-ink);
 }
 .avatar[data-tone="orange"] {
-  background: #fff0db;
-  color: #98601c;
+  background: var(--avatar-orange-bg);
+  color: var(--avatar-orange-ink);
 }
 .avatar[data-tone="slate"] {
-  background: #e7ecf1;
-  color: #526577;
+  background: var(--avatar-slate-bg);
+  color: var(--avatar-slate-ink);
 }
 
 .mobile-only {

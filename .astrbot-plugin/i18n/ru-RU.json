@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "display_name": "QQ Agently Mail"
+  },
+  "views": {
+    "mail": {
+      "title": "Почта"
+    }
+  }
+}

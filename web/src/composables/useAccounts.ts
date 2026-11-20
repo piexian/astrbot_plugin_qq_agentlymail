@@ -13,6 +13,7 @@ import type {
 import { decorateAccount } from "../utils/display";
 import { errorMessage } from "../utils/error";
 import { formatBytes } from "../utils/format";
+import { t } from "./useHostContext";
 import type { Notify } from "./useToasts";
 
 function numeric(value: unknown): number | null {
@@ -65,9 +66,12 @@ export function useAccounts(api: MailApi, notify: Notify) {
     const perMinute = numeric(limits.requests_per_minute);
     const perHour = numeric(limits.requests_per_hour);
     return {
-      dailySend: daily === null ? "—" : `${daily} 封 · 今日已发 ${identity.sent_today_local}`,
-      perMinute: perMinute === null ? "—" : `${perMinute} / 分钟`,
-      perHour: perHour === null ? "—" : `${perHour} / 小时`,
+      dailySend:
+        daily === null
+          ? "—"
+          : t("quota.dailySendValue", { daily, sent: identity.sent_today_local }),
+      perMinute: perMinute === null ? "—" : t("quota.perMinuteValue", { value: perMinute }),
+      perHour: perHour === null ? "—" : t("quota.perHourValue", { value: perHour }),
       singleAttachment: bytesLabel(constraints.max_attachment_size_bytes),
       totalAttachment: bytesLabel(constraints.max_total_attachments_size_bytes),
     };
@@ -153,7 +157,11 @@ export function useAccounts(api: MailApi, notify: Notify) {
       aliasId.value = result.alias.alias_id;
     }
     const email = result.alias.email ?? result.alias.alias_id;
-    notify(result.reused ? `90 天保留期内复用旧地址：${email}` : `已新建地址：${email}`);
+    notify(
+      result.reused
+        ? t("mailboxDialog.reusedToast", { email })
+        : t("mailboxDialog.createdToast", { email }),
+    );
     if (result.refresh_error) notify(result.refresh_error);
     return result;
   }
@@ -168,7 +176,7 @@ export function useAccounts(api: MailApi, notify: Notify) {
       const target = accounts.value.find((item) => item.account === account);
       aliasId.value = target?.aliases[0]?.alias_id ?? null;
     }
-    notify("已注销地址");
+    notify(t("mailboxDialog.deletedToast"));
     if (result.refresh_error) notify(result.refresh_error);
     return result;
   }

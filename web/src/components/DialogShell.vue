@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useTemplateRef, watch } from "vue";
+import { useI18n } from "../composables/useHostContext";
 import SvgIcon from "./SvgIcon.vue";
 
 const props = defineProps<{
@@ -11,6 +12,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: [] }>();
 const dialogRef = useTemplateRef<HTMLDialogElement>("dialog");
+const { t } = useI18n();
 
 watch(
   () => props.open,
@@ -35,7 +37,7 @@ watch(
         <h2>{{ title }}</h2>
         <p v-if="subtitle">{{ subtitle }}</p>
       </div>
-      <button class="icon-button" aria-label="关闭" @click="emit('close')">
+      <button class="icon-button" :aria-label="t('dialog.close')" @click="emit('close')">
         <SvgIcon name="close" />
       </button>
     </div>

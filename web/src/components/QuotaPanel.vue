@@ -1,20 +1,25 @@
 <script setup lang="ts">
+import { useI18n } from "../composables/useHostContext";
 import type { QuotaView } from "../types/mail";
 import SvgIcon from "./SvgIcon.vue";
 
 defineProps<{ quota: QuotaView }>();
+const { t } = useI18n();
 </script>
 
 <template>
-  <section class="quota-panel" aria-label="账号额度与限制">
-    <div class="quota-heading"><span>账号额度与限制</span><SvgIcon name="quota" /></div>
+  <section class="quota-panel" :aria-label="t('quota.title')">
+    <div class="quota-heading">
+      <span>{{ t("quota.title") }}</span
+      ><SvgIcon name="quota" />
+    </div>
     <dl>
       <div>
-        <dt>每日发信</dt>
+        <dt>{{ t("quota.dailySend") }}</dt>
         <dd>{{ quota.dailySend }}</dd>
       </div>
       <div>
-        <dt>API 请求</dt>
+        <dt>{{ t("quota.apiRequests") }}</dt>
         <dd>{{ quota.perMinute }}</dd>
       </div>
       <div>
@@ -22,14 +27,14 @@ defineProps<{ quota: QuotaView }>();
         <dd>{{ quota.perHour }}</dd>
       </div>
       <div>
-        <dt>单附件</dt>
+        <dt>{{ t("quota.singleAttachment") }}</dt>
         <dd>{{ quota.singleAttachment }}</dd>
       </div>
       <div>
-        <dt>总附件</dt>
+        <dt>{{ t("quota.totalAttachment") }}</dt>
         <dd>{{ quota.totalAttachment }}</dd>
       </div>
     </dl>
-    <p>当前账号的地址共享额度</p>
+    <p>{{ t("quota.sharedNote") }}</p>
   </section>
 </template>

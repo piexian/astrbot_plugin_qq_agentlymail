@@ -8,6 +8,7 @@ import type {
   DeleteAddressResult,
   FolderId,
   ForwardResult,
+  LoginCancelResult,
   Me,
   Message,
   MessageSummary,
@@ -16,6 +17,7 @@ import type {
   ReplyResult,
   SendResult,
   TrashResult,
+  WebLoginSession,
 } from "../types/mail";
 
 export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
@@ -90,6 +92,10 @@ export interface MailApi {
   forward(params: ForwardParams): Promise<ForwardResult>;
   createAddress(account: string): Promise<CreateAddressResult>;
   deleteAddress(account: string, aliasId: string): Promise<DeleteAddressResult>;
+  loginStart(account: string): Promise<WebLoginSession>;
+  loginStatus(sessionId: string): Promise<WebLoginSession>;
+  loginSelect(sessionId: string, email: string): Promise<WebLoginSession>;
+  loginCancel(sessionId?: string): Promise<LoginCancelResult>;
 }
 
 export function createMailApi(bridge: AstrBotBridge): MailApi {
@@ -136,6 +142,24 @@ export function createMailApi(bridge: AstrBotBridge): MailApi {
         account,
         alias_id: aliasId,
       });
+    },
+    loginStart(account) {
+      return bridge.apiPost<WebLoginSession>("login_start", { account });
+    },
+    loginStatus(sessionId) {
+      return bridge.apiGet<WebLoginSession>("login_status", { session_id: sessionId });
+    },
+    loginSelect(sessionId, email) {
+      return bridge.apiPost<WebLoginSession>("login_select", {
+        session_id: sessionId,
+        email,
+      });
+    },
+    loginCancel(sessionId) {
+      return bridge.apiPost<LoginCancelResult>(
+        "login_cancel",
+        sessionId ? { session_id: sessionId } : {},
+      );
     },
   };
 }

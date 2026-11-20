@@ -4,9 +4,12 @@ import { getBridge } from "./api/bridge";
 import { ALIAS_LIMIT_FALLBACK, createMailApi, type MailApi } from "./api/mailApi";
 import { useAccounts } from "./composables/useAccounts";
 import { useCompose, type ComposeMode } from "./composables/useCompose";
+import { applyHostContext, syncHostContext, useI18n } from "./composables/useHostContext";
+import { useLogin } from "./composables/useLogin";
 import { useMessageList } from "./composables/useMessageList";
 import { useReader } from "./composables/useReader";
 import { useToasts } from "./composables/useToasts";
+import type { MessageKey } from "./i18n/messages";
 import type { Alias, Attachment, Me } from "./types/mail";
 import { errorMessage } from "./utils/error";
 import IconSprite from "./components/IconSprite.vue";
@@ -16,20 +19,23 @@ import SideBar from "./components/SideBar.vue";
 import MessageListPane from "./components/MessageListPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
 import AccountDialog from "./components/AccountDialog.vue";
+import LoginDialog from "./components/LoginDialog.vue";
 import MailboxDialog from "./components/MailboxDialog.vue";
 import DeleteAliasDialog from "./components/DeleteAliasDialog.vue";
 import ComposeDialog from "./components/ComposeDialog.vue";
 import SendConfirmDialog from "./components/SendConfirmDialog.vue";
 import ToastRegion from "./components/ToastRegion.vue";
 
+const { t } = useI18n();
 const { toasts, notify } = useToasts();
 
 const bridge = getBridge();
+let stopHostSync: (() => void) | null = null;
 // bridge 缺失时不构造真实客户端，也不回退 mock；初始化错误态直接渲染。
 const mailApi = (bridge ? createMailApi(bridge) : null) as MailApi;
-const initError = shallowRef<string | null>(
-  bridge ? null : "未检测到 AstrBotPluginView 桥接，请在 AstrBot WebUI 的插件视图中打开本页面。",
-);
+const initErrorKey = shallowRef<MessageKey | null>(bridge ? null : "app.bridgeMissing");
+const initErrorRaw = shallowRef<string | null>(null);
+const initError = computed(() => (initErrorKey.value ? t(initErrorKey.value) : initErrorRaw.value));
 const initializing = shallowRef(true);
 
 const accountStore = useAccounts(mailApi, notify);
@@ -117,6 +123,28 @@ const {
   cancelConfirm,
 } = compose;
 
+const login = useLogin({
+  api: mailApi,
+  notify,
+  onLoggedIn: handleLoggedIn,
+});
+const {
+  open: loginOpen,
+  accountInput: loginAccount,
+  session: loginSession,
+  starting: loginStarting,
+  selecting: loginSelecting,
+  cancelling: loginCancelling,
+  localError: loginError,
+  isInFlight: loginInFlight,
+  openLogin,
+  startLogin,
+  refreshQr,
+  selectMail: selectLoginMail,
+  cancelLogin,
+  closeLogin,
+} = login;
+
 const sidebarOpen = shallowRef(false);
 const accountDialogOpen = shallowRef(false);
 const mailboxDialogOpen = shallowRef(false);
@@ -141,8 +169,8 @@ const composeDisabled = computed(
 );
 const listSummary = computed(() => {
   const count = messages.value.length;
-  if (searchMode.value) return `关键词“${query.value.trim()}” · 已加载 ${count} 封`;
-  return hasMore.value ? `已加载 ${count} 封 · 还有更多` : `已加载 ${count} 封`;
+  if (searchMode.value) return t("list.summarySearch", { query: query.value.trim(), count });
+  return hasMore.value ? t("list.summaryMore", { count }) : t("list.summaryLoaded", { count });
 });
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -164,12 +192,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 async function initialize() {
   if (!bridge) return;
   initializing.value = true;
+  initErrorKey.value = null;
+  initErrorRaw.value = null;
   try {
-    await withTimeout(bridge.ready(), 10000, "桥接初始化超时，请刷新插件视图重试。");
+    const ctx = await withTimeout(bridge.ready(), 10000, t("app.bridgeTimeout"));
+    applyHostContext(ctx);
     await loadAccounts();
     selectDefaultAccount();
   } catch (error) {
-    initError.value = errorMessage(error);
+    initErrorRaw.value = errorMessage(error);
   } finally {
     initializing.value = false;
   }
@@ -191,7 +222,7 @@ function onSelectAddress(nextAccountId: string, nextAliasId: string) {
   selectedMessageId.value = null;
   mobileReading.value = false;
   accountDialogOpen.value = false;
-  notify(`已切换至 ${currentAlias.value?.email ?? nextAliasId}`);
+  notify(t("app.switchedTo", { target: currentAlias.value?.email ?? nextAliasId }));
 }
 
 // 切账号或别名时清理阅读器与移动端状态，列表刷新由 useMessageList 的筛选键负责。
@@ -222,8 +253,28 @@ function onManage(nextAccountId: string) {
   void loadManagedMe(nextAccountId);
 }
 
+async function handleLoggedIn(loggedAccount: string) {
+  await loadAccounts();
+  const target = accounts.value.find((item) => item.account === loggedAccount);
+  if (target && target.aliases.length > 0) {
+    const primary = target.aliases.find((alias) => alias.is_primary) ?? target.aliases[0];
+    selectAddress(target.account, primary.alias_id);
+    resetView();
+    selectedMessageId.value = null;
+    mobileReading.value = false;
+  } else {
+    selectDefaultAccount();
+  }
+}
+
 function onAddAccount() {
-  notify("添加账号请在聊天中执行 /agently login");
+  accountDialogOpen.value = false;
+  openLogin("default", false);
+}
+
+function onRelogin(targetAccount?: string) {
+  accountDialogOpen.value = false;
+  openLogin(targetAccount || "default", Boolean(targetAccount));
 }
 
 async function onCreateAlias() {
@@ -285,7 +336,7 @@ async function onDownload(attachment: Attachment, index: number) {
         : { account, alias_id: alias, message_id: messageId, index };
     await mailApi.downloadAttachment(ref, attachment.filename ?? undefined);
   } catch {
-    notify("附件下载失败，请稍后重试");
+    notify(t("app.downloadFailed"));
   } finally {
     downloading.value = false;
   }
@@ -311,7 +362,7 @@ async function trashSelected() {
   const alias = currentAlias.value?.alias_id;
   if (!message || !account || !alias || trashLoading.value) return;
   if (folder.value === "trash") {
-    notify("这封邮件已经在垃圾箱中");
+    notify(t("app.alreadyInTrash"));
     return;
   }
   trashLoading.value = true;
@@ -320,7 +371,7 @@ async function trashSelected() {
     selectedMessageId.value = null;
     mobileReading.value = false;
     reloadList();
-    notify("已移到垃圾箱");
+    notify(t("app.movedToTrash"));
   } catch (error) {
     notify(errorMessage(error));
   } finally {
@@ -366,11 +417,14 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => {
+  stopHostSync = syncHostContext(bridge);
   void initialize();
   window.addEventListener("resize", onResize);
   document.addEventListener("keydown", onKeydown);
 });
 onUnmounted(() => {
+  stopHostSync?.();
+  stopHostSync = null;
   window.removeEventListener("resize", onResize);
   document.removeEventListener("keydown", onKeydown);
 });
@@ -381,15 +435,15 @@ onUnmounted(() => {
   <div v-if="initError" class="init-screen" role="alert">
     <div class="init-card">
       <SvgIcon name="mail" />
-      <strong>无法初始化邮箱</strong>
+      <strong>{{ t("app.initFailedTitle") }}</strong>
       <p>{{ initError }}</p>
-      <button class="button primary" @click="reloadPage">刷新页面</button>
+      <button class="button primary" @click="reloadPage">{{ t("app.reloadPage") }}</button>
     </div>
   </div>
   <div v-else-if="initializing" class="init-screen">
     <div class="init-card">
       <SvgIcon name="refresh" />
-      <strong>正在初始化…</strong>
+      <strong>{{ t("app.initializing") }}</strong>
     </div>
   </div>
   <template v-else>
@@ -419,7 +473,7 @@ onUnmounted(() => {
         />
         <button
           class="sidebar-scrim"
-          aria-label="关闭邮箱导航"
+          :aria-label="t('app.closeNav')"
           @click="sidebarOpen = false"
         ></button>
         <MessageListPane
@@ -441,6 +495,7 @@ onUnmounted(() => {
           :account-count="accounts.length"
           @select-message="onSelectMessage"
           @open-account="openAccountDialog"
+          @open-login="onRelogin"
           @compose="onOpenCompose('new')"
           @load-more="loadMore"
           @retry="reloadList"
@@ -472,6 +527,23 @@ onUnmounted(() => {
       @select-address="onSelectAddress"
       @manage="onManage"
       @add-account="onAddAccount"
+      @relogin="onRelogin"
+    />
+    <LoginDialog
+      v-model:account="loginAccount"
+      :open="loginOpen"
+      :session="loginSession"
+      :starting="loginStarting"
+      :selecting="loginSelecting"
+      :cancelling="loginCancelling"
+      :local-error="loginError"
+      :is-in-flight="loginInFlight"
+      @close="closeLogin"
+      @start="startLogin"
+      @refresh="refreshQr"
+      @select-mail="selectLoginMail"
+      @abort="cancelLogin(true)"
+      @copied="notify"
     />
     <MailboxDialog
       :open="mailboxDialogOpen"
