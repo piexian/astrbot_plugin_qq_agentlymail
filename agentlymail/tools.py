@@ -39,7 +39,7 @@ DEFAULT_MAX_BODY_CHARS = 8000
 
 def _safe_path_identifier(value: str) -> bool:
     """判断协议标识是否可以安全地出现在 URL 和附件目录名中。"""
-    return bool(value) and all(
+    return bool(value) and value not in {".", ".."} and all(
         ord(char) >= 32 and char not in "/\\?#%" for char in value
     )
 
@@ -137,7 +137,7 @@ async def _resolve_account(
         logger.warning("[agently] 工具账号解析失败：当前会话未绑定账号")
         return None, error_result(
             "当前会话未绑定账号",
-            "请先执行 /agently bind <账号名> 绑定已有账号，或让管理员执行 /agently login。",
+            "请先让管理员执行 /agently bind <账号名> 绑定已有账号，或执行 /agently login。",
         )
     logger.debug(f"[agently] 工具账号解析完成：账号={account}")
     return account, None
@@ -159,13 +159,41 @@ async def _resolve_mailbox(
     event: AstrMessageEvent,
     kwargs: dict[str, Any],
 ) -> tuple[_ResolvedMailbox | None, ToolExecResult | None]:
-    """解析账号和别名，并在邮件操作前校验凭证与别名归属。"""
-    if "account" in kwargs:
-        raw_account = kwargs["account"]
+    """解析账号和别名，并在邮件操作前校验跨账号权限、凭证与别名归属。"""
+    raw_account = kwargs.get("account")
+    if "account" in kwargs and raw_account is not None:
         if not isinstance(raw_account, str) or not raw_account.strip():
             logger.warning("[agently] 工具邮箱解析失败：账号不是非空字符串")
             return None, error_result("account 必须是非空字符串")
         account = raw_account.strip()
+        if account in {".", ".."} or any(
+            char in account for char in ("\x00", "/", "\\")
+        ):
+            logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
+            return None, error_result("account 为空或含非法路径字符")
+
+        bindings = await plugin._load_bindings()
+        raw_bound = bindings.get(event.unified_msg_origin)
+        bound_account = (
+            raw_bound.strip()
+            if isinstance(raw_bound, str) and raw_bound.strip()
+            else None
+        )
+        if account != bound_account and not event.is_admin():
+            logger.warning(
+                f"[agently] 工具跨账号访问拒绝：请求账号={account}，"
+                f"会话已绑定={bound_account is not None}"
+            )
+            if bound_account is None:
+                return None, error_result(
+                    "权限不足",
+                    "当前会话未绑定账号，非管理员不能通过 account 参数访问其他账号；"
+                    "请先让管理员执行 /agently bind <账号名> 绑定。",
+                )
+            return None, error_result(
+                "权限不足",
+                "非管理员只能访问当前会话绑定的账号，不能通过 account 参数切换到其他账号。",
+            )
     else:
         account, failure = await _resolve_account(plugin, event)
         if failure is not None:
@@ -173,13 +201,15 @@ async def _resolve_mailbox(
         if not isinstance(account, str) or not account.strip():
             logger.warning("[agently] 工具邮箱解析失败：绑定账号无效")
             return None, error_result("当前会话绑定的账号名无效")
-
-    if account in {".", ".."} or any(char in account for char in ("\x00", "/", "\\")):
-        logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
-        return None, error_result("account 为空或含非法路径字符")
+        account = account.strip()
+        if account in {".", ".."} or any(
+            char in account for char in ("\x00", "/", "\\")
+        ):
+            logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
+            return None, error_result("account 为空或含非法路径字符")
 
     requested_alias_id: str | None = None
-    if "alias_id" in kwargs:
+    if "alias_id" in kwargs and kwargs["alias_id"] is not None:
         raw_alias_id = kwargs["alias_id"]
         if not isinstance(raw_alias_id, str) or not raw_alias_id.strip():
             logger.warning(f"[agently] 工具地址解析失败：账号={account}，地址标识不是非空字符串")
@@ -419,7 +449,8 @@ class AgentlyMailReadTool(FunctionTool):
             name="agently_mail_read",
             description=(
                 "读取 QQ Agently Mail 邮箱；默认使用当前会话绑定账号的主地址，"
-                "可用 account/alias_id 指定已登录账号及其所属地址。"
+                "可用 alias_id 指定所属地址；非管理员仅可访问当前会话绑定的账号，"
+                "仅管理员可用 account 跨会话指定其他已登录账号。"
                 "action=whoami 查看选中账号与邮箱；list 按目录分页列摘要；"
                 "read 按 message_id 读全文（可选下载附件）；search 按关键词搜索；"
                 "quota 估算发信额度。"
@@ -430,7 +461,9 @@ class AgentlyMailReadTool(FunctionTool):
                         "要执行的操作",
                         ["whoami", "list", "read", "search", "quota"],
                     ),
-                    "account": string_param("可选账号名，缺省使用当前会话绑定账号"),
+                    "account": string_param(
+                        "可选账号名，缺省使用当前会话绑定账号；非管理员仅可指定当前会话已绑定的账号，管理员可指定任意已登录账号"
+                    ),
                     "alias_id": string_param("可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "dir": enum_param(
                         "list 的邮件目录",
@@ -678,7 +711,8 @@ class AgentlyMailSendTool(FunctionTool):
             name="agently_mail_send",
             description=(
                 "用 QQ Agently Mail 邮箱发信；send/reply/forward/watch_start 默认使用当前会话绑定账号的主地址，"
-                "可用 account/alias_id 指定已登录账号及其所属地址；"
+                "可用 alias_id 指定所属地址；非管理员仅可访问当前会话绑定的账号，"
+                "仅管理员可用 account 跨会话指定其他已登录账号；"
                 "action=send 发新邮件（可带本地附件）；reply 回复指定邮件；"
                 "forward 转发指定邮件；watch_start 监听所选地址，"
                 "watch_stop 停止当前会话唯一监听；收到新邮件会自动推送到本会话。"
@@ -689,7 +723,9 @@ class AgentlyMailSendTool(FunctionTool):
                         "要执行的操作",
                         ["send", "reply", "forward", "watch_start", "watch_stop"],
                     ),
-                    "account": string_param("send/reply/forward/watch_start 可选账号名，缺省使用当前会话绑定账号"),
+                    "account": string_param(
+                        "send/reply/forward/watch_start 可选账号名，缺省使用当前会话绑定账号；非管理员仅可指定当前会话已绑定的账号，管理员可指定任意已登录账号"
+                    ),
                     "alias_id": string_param("send/reply/forward/watch_start 可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "to": string_array_param("send/forward 的收件人邮箱地址"),
                     "cc": string_array_param("send 的抄送邮箱地址"),
