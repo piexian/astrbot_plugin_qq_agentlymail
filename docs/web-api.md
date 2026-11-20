@@ -25,6 +25,10 @@
 | POST | `forward` | `{account,alias_id,message_id,to,body,body_format,include_attachments?}` | `{queued:true,message_id,to,include_attachments,local_count_recorded}`；include_attachments 默认 true |
 | POST | `create_address` | `{account}` | `{alias:{alias_id,email,is_primary},reused,aliases,refresh_required,refresh_error}`；刷新失败时 aliases=null、refresh_required=true，alias 取写结果字段 |
 | POST | `delete_address` | `{account,alias_id}` | `{alias_id,aliases,refresh_required,refresh_error}`；刷新失败时 aliases=null、refresh_required=true；允许注销到零地址 |
+| POST | `login_start` | `{account?}` | 发起或刷新微信扫码登录（自动中断旧会话）；返回 `{session_id,account,mode,state,qr_image,qr_expired,browser_url,input_code,expires_at,mails,email,error,error_code}` |
+| GET | `login_status` | `session_id` | 返回登录会话当前安全快照；状态含 `waiting_scan`/`scanned`/`select_mail`/`authorizing`/`success`/`expired`/`cancelled`/`error` |
+| POST | `login_select` | `{session_id,email}` | 多邮箱账号在 `select_mail` 阶段提交所选邮箱并继续完成授权 |
+| POST | `login_cancel` | `{session_id?}` | 立即中断当前或指定登录会话并清理后台轮询与无头客户端 |
 
 摘要项只含 `message_id,subject,from_,created_at,is_read`，不含 body/preview/attachments；正文与附件须选中后另调 `message`。协议无独立标记已读端点，`is_read` 以重新列表为准。
 
@@ -60,4 +64,4 @@
 5. `send` 返回 `{queued:true}` 而非邮件对象；to/cc 改字符串数组；发送后切到 sent 重新列表。reply/forward 改调专属端点。`local_count_recorded=false` 仅表示本地计数未记录，仍按发送成功处理。
 6. 地址配额用 `me.account_info.agent_alias_limit`，不再硬编码 5；create/delete 响应自带刷新后 aliases，刷新失败时 `aliases=null` 且 `refresh_required=true`，前端应重新拉取 accounts。
 7. MailAccount 的 name/initials/tone 是展示装饰，由前端从 account/email 派生。
-8. 添加账号无端点，继续提示聊天 `/agently login`；本阶段不含扫码登录与 SSE 推送。
+8. WebUI 内置微信扫码登录（`login_start` / `login_status` / `login_select` / `login_cancel`）：同时展示二维码与可复制原链接（不跳转外链），支持刷新二维码、多邮箱选择与随时中断；后台并行监听微信扫码与原设备流链接，任意一路完成授权即落盘凭证。
