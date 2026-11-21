@@ -1,0 +1,137 @@
+name: CI
+
+# 在 push / PR 时运行 Python 与 WebUI 检查；同时通过 workflow_call 供 release.yml 复用，
+# 保证测试、类型检查与构建产物一致性全部通过后才允许打包发版。
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-check:
+    name: Python 检查与模型验证
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 校验 Python 语法与配置元数据
+        run: |
+          python -m py_compile main.py agentlymail/*.py
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
+          assert isinstance(schema, dict) and schema, "_conf_schema.json 不能为空"
+
+          meta_text = Path("metadata.yaml").read_text(encoding="utf-8")
+          m = re.search(r"^version:\s*['\"]?([^'\"\s]+)['\"]?\s*$", meta_text, re.M)
+          assert m and re.match(r"^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$", m.group(1)), (
+              f"metadata.yaml 版本格式无效: {m.group(1) if m else None}"
+          )
+          PY
+
+      - name: 验证响应数据模型边界用例
+        run: |
+          python - <<'PY'
+          from agentlymail.models import Attachment, Me, Message, MessageSummary, Page
+
+          a_str = Attachment.from_payload(
+              {"attachment_id": "att_1", "filename": "a.pdf", "size": "4096"}
+          )
+          assert a_str.size == 4096 and a_str.filename == "a.pdf"
+
+          a_int = Attachment.from_payload({"id": "att_2", "name": "b.png", "size": 1024})
+          assert a_int.attachment_id == "att_2" and a_int.filename == "b.png" and a_int.size == 1024
+
+          assert Attachment.from_payload({"filename": "c.bin", "size": ""}).size is None
+          assert Attachment.from_payload({"filename": "d.bin", "size": "N/A"}).size is None
+
+          try:
+              Attachment.from_payload({"filename": "bad.bin", "size": True})
+              raise AssertionError("bool size should raise ValueError")
+          except ValueError:
+              pass
+
+          msg = Message.from_payload(
+              {
+                  "message_id": "msg_1",
+                  "body": None,
+                  "body_format": None,
+                  "attachments": None,
+              }
+          )
+          assert msg.body == "" and msg.body_format == "PLAIN" and msg.attachments == []
+
+          page = Page.from_payload({"data": None, "pagination": None}, MessageSummary.from_payload)
+          assert page.data == [] and page.has_more is False and page.next_cursor is None
+
+          me = Me.from_payload(
+              {"aliases": None, "scopes": None, "rate_limits": None, "constraints": None}
+          )
+          assert me.aliases == [] and me.scopes == []
+          print("python model checks passed")
+          PY
+
+  web-check:
+    name: WebUI 规范、类型与产物一致性检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.21.0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 格式与 Lint 检查
+        run: pnpm exec vp check
+
+      - name: TypeScript 类型检查
+        run: pnpm exec vue-tsc -b --force
+
+      - name: 构建 WebUI 并校验 views/mail 产物同步
+        run: |
+          pnpm exec vp build
+          cd ..
+          if [ -n "$(git status --porcelain -- views/mail)" ]; then
+            echo "::error::views/mail 构建产物与 web/ 源码或依赖不一致，请本地运行 vp build 后一并提交。"
+            git status --short -- views/mail
+            git diff --stat -- views/mail
+            exit 1
+          fi

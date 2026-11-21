@@ -1,6 +1,7 @@
 name: Release
 
-# master 检测到 metadata.yaml 新版本时自动校验 CHANGELOG、打包插件 ZIP、创建标签并发布 GitHub Release。
+# master 检测到 metadata.yaml 新版本时，先校验版本与更新日志，再运行完整 CI 检查，
+# 全部通过后才打包插件 ZIP、创建标签并发布 GitHub Release；任意前置步骤失败即中止发布。
 on:
   push:
     branches:
@@ -17,9 +18,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: 自动打标签并发布
+  prepare:
+    name: 校验版本与更新日志
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      should_release: ${{ steps.ver.outputs.should_release }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v7
@@ -43,7 +49,7 @@ jobs:
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 提取对应版本更新日志
+      - name: 校验对应版本更新日志存在且非空
         if: steps.ver.outputs.should_release == 'true'
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -62,23 +68,49 @@ jobs:
             exit 1
           fi
 
+  ci:
+    name: 运行前置检查与测试
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: 打包、打标签并发布
+    needs:
+      - prepare
+      - ci
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 提取对应版本更新日志
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          awk -v head="## [${VERSION}]" '
+            index($0, head) == 1 { found = 1 }
+            found && /^## / && index($0, head) != 1 { exit }
+            found { print }
+          ' CHANGELOG.md > section.md
+          test -s section.md
+
       - name: 打包插件 ZIP
-        if: steps.ver.outputs.should_release == 'true'
         run: |
           STAGE=astrbot_plugin_qq_agentlymail
-          rm -rf "$STAGE" "${STAGE}-${{ steps.ver.outputs.tag }}.zip"
+          rm -rf "$STAGE" "${STAGE}-${{ needs.prepare.outputs.tag }}.zip"
           mkdir -p "$STAGE"
           cp -r .astrbot-plugin agentlymail views "$STAGE"/
           find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
           find "$STAGE" -type f -name '*.pyc' -delete
           cp CHANGELOG.md LICENSE README.md _conf_schema.json logo.png main.py metadata.yaml "$STAGE"/
-          zip -qr "${STAGE}-${{ steps.ver.outputs.tag }}.zip" "$STAGE"
-          test -s "${STAGE}-${{ steps.ver.outputs.tag }}.zip"
+          zip -qr "${STAGE}-${{ needs.prepare.outputs.tag }}.zip" "$STAGE"
+          test -s "${STAGE}-${{ needs.prepare.outputs.tag }}.zip"
 
       - name: 创建并推送版本标签
-        if: steps.ver.outputs.should_release == 'true'
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
           TARGET_SHA="${GITHUB_SHA}"
           REMOTE_SHA=$(git ls-remote origin "refs/tags/${TAG}^{}" "refs/tags/${TAG}" | awk 'NR==1 { first=$1 } /\^\{\}$/ { peeled=$1 } END { print (peeled != "" ? peeled : first) }')
           if [ -z "$REMOTE_SHA" ]; then
@@ -92,16 +124,14 @@ jobs:
           fi
 
       - name: 生成 PR 与贡献者说明
-        if: steps.ver.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="${{ steps.ver.outputs.tag }}" \
+            -f tag_name="${{ needs.prepare.outputs.tag }}" \
             --jq '.body' > whats-new.md
 
       - name: 组装 Release 正文
-        if: steps.ver.outputs.should_release == 'true'
         run: |
           {
             cat section.md
@@ -112,12 +142,11 @@ jobs:
           } > body.md
 
       - name: 发布 GitHub Release
-        if: steps.ver.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.ver.outputs.tag }}" \
-            "astrbot_plugin_qq_agentlymail-${{ steps.ver.outputs.tag }}.zip" \
-            --title "${{ steps.ver.outputs.tag }}" \
+          gh release create "${{ needs.prepare.outputs.tag }}" \
+            "astrbot_plugin_qq_agentlymail-${{ needs.prepare.outputs.tag }}.zip" \
+            --title "${{ needs.prepare.outputs.tag }}" \
             --notes-file body.md \
             --verify-tag
