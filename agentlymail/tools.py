@@ -126,19 +126,79 @@ def _admin_only_error(
     return error_result("权限不足", "QQ Agently Mail 管理工具仅管理员可用。")
 
 
+def _check_umo_access(
+    plugin: QQAgentlyMailPlugin,
+    event: AstrMessageEvent,
+) -> ToolExecResult | None:
+    """按 umo_filter_mode 与 umo_filter_list 校验当前会话是否允许使用邮箱工具。"""
+    umo = event.unified_msg_origin
+    mode, umos = plugin._umo_filter_config()
+    if mode == "blacklist":
+        if umo in umos:
+            logger.warning("[agently] 工具调用拒绝：原因=会话在黑名单中")
+            return error_result(
+                "当前会话已被禁止使用邮箱工具",
+                "当前会话在 umo_filter_list 黑名单中；可在插件配置中调整。",
+            )
+        return None
+
+    # whitelist 模式：列表为空时仅管理员可用；列表非空时命中列表或管理员本人可用。
+    if event.is_admin() or (umos and umo in umos):
+        return None
+    logger.warning(
+        f"[agently] 工具调用拒绝：原因=会话未在白名单且非管理员，白名单数量={len(umos)}"
+    )
+    if not umos:
+        return error_result(
+            "权限不足",
+            "当前为白名单模式且未配置放行会话，默认仅管理员可用；"
+            "可在插件配置 umo_filter_list 中添加会话 UMO（/sid 可查看）或切换为 blacklist 模式。",
+        )
+    return error_result(
+        "当前会话未在邮箱访问白名单中",
+        "可在插件配置 umo_filter_list 中添加当前会话 UMO（/sid 可查看），或由管理员本人调用。",
+    )
+
+
+def _validate_account_input(raw_account: Any) -> tuple[str | None, ToolExecResult | None]:
+    """校验工具传入的账号名合法性。"""
+    if not isinstance(raw_account, str) or not raw_account.strip():
+        logger.warning("[agently] 工具账号解析失败：账号不是非空字符串")
+        return None, error_result("account 必须是非空字符串")
+    account = raw_account.strip()
+    if (
+        len(account) > 64
+        or account in {".", ".."}
+        or any(char in account for char in ("\x00", "/", "\\"))
+    ):
+        logger.warning("[agently] 工具账号解析失败：账号超长或含非法路径字符")
+        return None, error_result("account 为空、超过 64 字符或含非法路径字符")
+    return account, None
+
+
 async def _resolve_account(
     plugin: QQAgentlyMailPlugin,
     event: AstrMessageEvent,
+    raw_account: Any = None,
 ) -> tuple[str | None, ToolExecResult | None]:
-    """按会话绑定解析账号，未绑定时返回提示先绑定的错误结果。"""
-    bindings = await plugin._load_bindings()
-    account = bindings.get(event.unified_msg_origin)
-    if account is None:
-        logger.warning("[agently] 工具账号解析失败：当前会话未绑定账号")
-        return None, error_result(
-            "当前会话未绑定账号",
-            "请先让管理员执行 /agently bind <账号名> 绑定已有账号，或执行 /agently login。",
-        )
+    """校验当前会话访问权限并解析目标账号，缺省使用 default。"""
+    access_error = _check_umo_access(plugin, event)
+    if access_error is not None:
+        return None, access_error
+    if raw_account is None:
+        account = "default"
+    else:
+        account, failure = _validate_account_input(raw_account)
+        if failure is not None or account is None:
+            return None, failure
+        if account != "default" and not event.is_admin():
+            logger.warning(
+                f"[agently] 工具跨账号访问拒绝：请求账号={account}，原因=非管理员仅可使用默认账号"
+            )
+            return None, error_result(
+                "权限不足",
+                "非管理员仅可使用默认账号 default，不能通过 account 参数切换到其他账号。",
+            )
     logger.debug(f"[agently] 工具账号解析完成：账号={account}")
     return account, None
 
@@ -159,54 +219,11 @@ async def _resolve_mailbox(
     event: AstrMessageEvent,
     kwargs: dict[str, Any],
 ) -> tuple[_ResolvedMailbox | None, ToolExecResult | None]:
-    """解析账号和别名，并在邮件操作前校验跨账号权限、凭证与别名归属。"""
-    raw_account = kwargs.get("account")
-    if "account" in kwargs and raw_account is not None:
-        if not isinstance(raw_account, str) or not raw_account.strip():
-            logger.warning("[agently] 工具邮箱解析失败：账号不是非空字符串")
-            return None, error_result("account 必须是非空字符串")
-        account = raw_account.strip()
-        if account in {".", ".."} or any(
-            char in account for char in ("\x00", "/", "\\")
-        ):
-            logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
-            return None, error_result("account 为空或含非法路径字符")
-
-        bindings = await plugin._load_bindings()
-        raw_bound = bindings.get(event.unified_msg_origin)
-        bound_account = (
-            raw_bound.strip()
-            if isinstance(raw_bound, str) and raw_bound.strip()
-            else None
-        )
-        if account != bound_account and not event.is_admin():
-            logger.warning(
-                f"[agently] 工具跨账号访问拒绝：请求账号={account}，"
-                f"会话已绑定={bound_account is not None}"
-            )
-            if bound_account is None:
-                return None, error_result(
-                    "权限不足",
-                    "当前会话未绑定账号，非管理员不能通过 account 参数访问其他账号；"
-                    "请先让管理员执行 /agently bind <账号名> 绑定。",
-                )
-            return None, error_result(
-                "权限不足",
-                "非管理员只能访问当前会话绑定的账号，不能通过 account 参数切换到其他账号。",
-            )
-    else:
-        account, failure = await _resolve_account(plugin, event)
-        if failure is not None:
-            return None, failure
-        if not isinstance(account, str) or not account.strip():
-            logger.warning("[agently] 工具邮箱解析失败：绑定账号无效")
-            return None, error_result("当前会话绑定的账号名无效")
-        account = account.strip()
-        if account in {".", ".."} or any(
-            char in account for char in ("\x00", "/", "\\")
-        ):
-            logger.warning("[agently] 工具邮箱解析失败：账号含非法路径字符")
-            return None, error_result("account 为空或含非法路径字符")
+    """解析账号和别名，并在邮件操作前校验会话黑白名单、跨账号权限、凭证与别名归属。"""
+    raw_account = kwargs.get("account") if "account" in kwargs else None
+    account, failure = await _resolve_account(plugin, event, raw_account)
+    if failure is not None or account is None:
+        return None, failure
 
     requested_alias_id: str | None = None
     if "alias_id" in kwargs and kwargs["alias_id"] is not None:
@@ -224,7 +241,7 @@ async def _resolve_mailbox(
             logger.warning(f"[agently] 工具凭证解析失败：账号={account}，原因=凭证不存在")
             return None, error_result(
                 f"账号 {account!r} 没有可用凭证",
-                "请先执行 /agently login <账号名>，或绑定已有账号。",
+                "请先在 WebUI「邮局」扫码登录，或在聊天中执行 /agently login。",
             )
     except TokenStoreError as exc:
         logger.warning(f"[agently] 工具凭证解析失败：账号={account}，异常={type(exc).__name__}")
@@ -462,15 +479,15 @@ async def _dispatch_actions(
 
 @dataclass
 class AgentlyMailReadTool(FunctionTool):
-    """LLM 工具：读取绑定邮箱的身份、列表、全文、搜索与额度。"""
+    """LLM 工具：读取邮箱的身份、列表、全文、搜索与额度。"""
 
     def __init__(self, plugin: QQAgentlyMailPlugin):
         super().__init__(
             name="agently_mail_read",
             description=(
-                "读取 QQ Agently Mail 邮箱；默认使用当前会话绑定账号的主地址，"
-                "可用 alias_id 指定所属地址；非管理员仅可访问当前会话绑定的账号，"
-                "仅管理员可用 account 跨会话指定其他已登录账号。"
+                "读取 QQ Agently Mail 邮箱；默认使用 default 账号的主地址，"
+                "可用 alias_id 指定所属地址；非管理员仅可访问 default 账号，"
+                "管理员可用 account 指定其他已登录账号。"
                 "action=whoami 查看选中账号与邮箱；list 按目录分页列摘要；"
                 "read 按 message_id 读全文（可选下载附件）；search 按关键词搜索；"
                 "quota 估算发信额度。"
@@ -482,7 +499,7 @@ class AgentlyMailReadTool(FunctionTool):
                         ["whoami", "list", "read", "search", "quota"],
                     ),
                     "account": string_param(
-                        "可选账号名，缺省使用当前会话绑定账号；非管理员仅可指定当前会话已绑定的账号，管理员可指定任意已登录账号"
+                        "可选账号名，缺省使用 default；管理员可指定任意已登录账号"
                     ),
                     "alias_id": string_param("可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "dir": enum_param(
@@ -724,15 +741,15 @@ class AgentlyMailReadTool(FunctionTool):
 
 @dataclass
 class AgentlyMailSendTool(FunctionTool):
-    """LLM 工具：用绑定邮箱发信、回复、转发并监听新邮件。"""
+    """LLM 工具：用邮箱发信、回复、转发并监听新邮件。"""
 
     def __init__(self, plugin: QQAgentlyMailPlugin):
         super().__init__(
             name="agently_mail_send",
             description=(
-                "用 QQ Agently Mail 邮箱发信；send/reply/forward/watch_start 默认使用当前会话绑定账号的主地址，"
-                "可用 alias_id 指定所属地址；非管理员仅可访问当前会话绑定的账号，"
-                "仅管理员可用 account 跨会话指定其他已登录账号；"
+                "用 QQ Agently Mail 邮箱发信；send/reply/forward/watch_start 默认使用 default 账号的主地址，"
+                "可用 alias_id 指定所属地址；非管理员仅可访问 default 账号，"
+                "管理员可用 account 指定其他已登录账号；"
                 "action=send 发新邮件（可带本地附件）；reply 回复指定邮件；"
                 "forward 转发指定邮件；watch_start 监听所选地址，"
                 "watch_stop 停止当前会话唯一监听；收到新邮件会自动推送到本会话。"
@@ -744,7 +761,7 @@ class AgentlyMailSendTool(FunctionTool):
                         ["send", "reply", "forward", "watch_start", "watch_stop"],
                     ),
                     "account": string_param(
-                        "send/reply/forward/watch_start 可选账号名，缺省使用当前会话绑定账号；非管理员仅可指定当前会话已绑定的账号，管理员可指定任意已登录账号"
+                        "send/reply/forward/watch_start 可选账号名，缺省使用 default；管理员可指定任意已登录账号"
                     ),
                     "alias_id": string_param("send/reply/forward/watch_start 可选邮箱地址 ID，缺省使用所选账号的主地址"),
                     "to": string_array_param("send/forward 的收件人邮箱地址"),
@@ -1008,26 +1025,20 @@ class AgentlyMailSendTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
+        access_error = _check_umo_access(self._plugin, event)
+        if access_error is not None:
+            return access_error
         umo = event.unified_msg_origin
         if not event.is_admin():
             watched_account = await self._plugin._watched_account_for(umo)
-            if watched_account is not None:
-                bindings = await self._plugin._load_bindings()
-                raw_bound = bindings.get(umo)
-                bound_account = (
-                    raw_bound.strip()
-                    if isinstance(raw_bound, str) and raw_bound.strip()
-                    else None
+            if watched_account is not None and watched_account != "default":
+                logger.warning(
+                    f"[agently] 工具跨账号停止监听拒绝：监听账号={watched_account}"
                 )
-                if watched_account != bound_account:
-                    logger.warning(
-                        f"[agently] 工具跨账号停止监听拒绝：监听账号={watched_account}，"
-                        f"会话已绑定={bound_account is not None}"
-                    )
-                    return error_result(
-                        "权限不足",
-                        "非管理员只能停止当前会话已绑定账号的新邮件监听。",
-                    )
+                return error_result(
+                    "权限不足",
+                    "非管理员只能停止默认账号 default 的新邮件监听。",
+                )
         found, error = await self._plugin._stop_watch(umo)
         if error is not None:
             return error_result(error)
@@ -1045,7 +1056,7 @@ class AgentlyMailAdminTool(FunctionTool):
             description=(
                 "管理员专用：管理 QQ Agently Mail 账号、邮件删除与邮箱地址。"
                 "action=login 发起微信扫码登录，二维码、链接和验证码会发到本会话；多邮箱账号会要求回复编号；"
-                "logout 删除账号凭证并解绑；status 列出账号与当前会话绑定；"
+                "logout 删除账号凭证并停止其监听；status 列出全部账号与当前会话访问控制状态；"
                 "trash 把邮件移入垃圾箱；empty_trash 清空垃圾箱；"
                 "permanent_delete 永久删除邮件；"
                 "addresses 列出全部邮箱地址、昵称与别名配额；"
@@ -1069,7 +1080,7 @@ class AgentlyMailAdminTool(FunctionTool):
                             "delete_address",
                         ],
                     ),
-                    "account": string_param("login/logout 的账号名，默认 default", default="default"),
+                    "account": string_param("目标账号名，默认 default", default="default"),
                     "message_id": string_param("trash/permanent_delete 的邮件 ID"),
                     "alias_id": string_param("delete_address 要注销的地址 ID，可先用 addresses 查看"),
                 },
@@ -1102,10 +1113,30 @@ class AgentlyMailAdminTool(FunctionTool):
 
     def _account_of(self, kwargs: dict[str, Any]) -> str:
         """取可选账号名参数，缺省 default，非法输入返回空串。"""
-        account = kwargs.get("account") or "default"
-        if not isinstance(account, str) or not account.strip():
+        raw = kwargs.get("account") if kwargs.get("account") is not None else "default"
+        account, failure = _validate_account_input(raw)
+        if failure is not None or account is None:
             return ""
-        return account.strip()
+        return account
+
+    async def _resolve_admin_account(
+        self,
+        kwargs: dict[str, Any],
+    ) -> tuple[str | None, ToolExecResult | None]:
+        """解析管理员操作的目标账号并校验凭证已存在。"""
+        account = self._account_of(kwargs)
+        if not account:
+            return None, error_result("account 为空、超过 64 字符或含非法路径字符")
+        try:
+            bundle = await self._plugin._token_store.load(account)
+        except TokenStoreError as exc:
+            return None, error_result(f"读取账号 {account!r} 凭证失败：{exc}")
+        if bundle is None:
+            return None, error_result(
+                f"账号 {account!r} 没有可用凭证",
+                "请先在 WebUI「邮局」扫码登录，或在聊天中执行 /agently login。",
+            )
+        return account, None
 
     async def _login(
         self,
@@ -1114,7 +1145,7 @@ class AgentlyMailAdminTool(FunctionTool):
     ) -> ToolExecResult:
         account = self._account_of(kwargs)
         if not account:
-            return error_result("account 必须是非空字符串")
+            return error_result("account 为空、超过 64 字符或含非法路径字符")
         error = await self._plugin._start_login(event, account)
         if error is not None:
             return error_result(error)
@@ -1135,8 +1166,8 @@ class AgentlyMailAdminTool(FunctionTool):
     ) -> ToolExecResult:
         account = self._account_of(kwargs)
         if not account:
-            return error_result("account 必须是非空字符串")
-        deleted, unbound, error = await self._plugin._remove_account(account)
+            return error_result("account 为空、超过 64 字符或含非法路径字符")
+        deleted, error = await self._plugin._remove_account(account)
         if error is not None:
             return error_result(error)
         if not deleted:
@@ -1144,8 +1175,7 @@ class AgentlyMailAdminTool(FunctionTool):
         return ok_result(
             {
                 "account": account,
-                "unbound_sessions": unbound,
-                "message": f"已删除账号 {account} 的凭证，并解除 {unbound} 个会话的绑定。",
+                "message": f"已删除账号 {account} 的凭证。",
             }
         )
 
@@ -1162,8 +1192,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         message_id = _required_text(kwargs, "message_id")
         if message_id is None:
@@ -1183,8 +1213,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         client, _ = self._plugin._clients_for(account)
         await client.empty_trash()
@@ -1195,8 +1225,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         message_id = _required_text(kwargs, "message_id")
         if message_id is None:
@@ -1216,8 +1246,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         client, _ = self._plugin._clients_for(account)
         me = await client.me()
@@ -1243,8 +1273,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         client, _ = self._plugin._clients_for(account)
         created = await client.create_address()
@@ -1264,8 +1294,8 @@ class AgentlyMailAdminTool(FunctionTool):
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
     ) -> ToolExecResult:
-        account, failure = await _resolve_account(self._plugin, event)
-        if failure is not None:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
             return failure
         alias_id = _required_text(kwargs, "alias_id")
         if alias_id is None:

@@ -1,4 +1,17 @@
 {
+  "umo_filter_mode": {
+    "description": "会话（UMO）访问控制模式",
+    "type": "string",
+    "options": ["whitelist", "blacklist"],
+    "default": "whitelist",
+    "hint": "控制允许调用日常邮箱工具（agently_mail_read / agently_mail_send）的会话范围。whitelist（白名单）：列表为空时默认仅管理员可用，列表非空时命中列表的会话与管理员本人均可使用；blacklist（黑名单）：列表为空时所有会话均可用，列表非空时拦截列表内的会话。"
+  },
+  "umo_filter_list": {
+    "description": "会话（UMO）黑/白名单列表",
+    "type": "list",
+    "default": [],
+    "hint": "填写会话的 unified_msg_origin（可在聊天中发送 /sid 查看），配合上方 umo_filter_mode 生效。"
+  },
   "mail_send_whitelist": {
     "description": "发件收件人白名单",
     "type": "list",

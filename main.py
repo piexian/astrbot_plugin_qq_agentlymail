@@ -1,4 +1,4 @@
-"""实现 QQ Agently Mail 的登录会话承载、账号绑定指令与 LLM 工具面。"""
+"""实现 QQ Agently Mail 的登录会话承载、账号管理指令与 LLM 工具面。"""
 
 from __future__ import annotations
 
@@ -43,9 +43,6 @@ from .agentlymail.web_api import register_web_apis
 
 # 设备流 expires_in 固定为 600 秒，作为登录防重入的过期上限。
 LOGIN_FLOW_TTL_SECONDS = 600.0
-
-# KV 中会话到账号的绑定表键名，值为 {unified_msg_origin: 账号名}。
-BINDINGS_KEY = "umo_bindings"
 
 # KV 中本地发送计数的键名，值为 {账号名: {date: "YYYY-MM-DD", count: N}}。
 SEND_COUNTER_KEY = "send_counter"
@@ -131,6 +128,21 @@ class QQAgentlyMailPlugin(Star):
             return None
         return name
 
+    def _umo_filter_config(self) -> tuple[str, set[str]]:
+        """读取并规范化 UMO 黑/白名单配置，非法模式回退为 whitelist。"""
+        raw_mode = self._config.get("umo_filter_mode", "whitelist")
+        mode = str(raw_mode or "whitelist").strip().lower()
+        if mode not in {"whitelist", "blacklist"}:
+            logger.warning(f"[agently] UMO 过滤模式无效，已回退为白名单：配置值={raw_mode!r}")
+            mode = "whitelist"
+        raw_list = self._config.get("umo_filter_list", []) or []
+        umos = (
+            {item.strip() for item in raw_list if isinstance(item, str) and item.strip()}
+            if isinstance(raw_list, list)
+            else set()
+        )
+        return mode, umos
+
     @agently_group.command("login")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def login(self, event: AstrMessageEvent, account: str = "default"):
@@ -146,12 +158,12 @@ class QQAgentlyMailPlugin(Star):
     @agently_group.command("logout")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def logout(self, event: AstrMessageEvent, account: str = "default"):
-        """删除账号凭证并解绑引用它的会话，可带账号名，缺省 default"""
+        """删除账号凭证并清理其监听，可带账号名，缺省 default"""
         valid = self._validate_account_name(account)
         if valid is None:
             await event.send(event.plain_result("账号名无效：不能为空、超过 64 字符或包含非法路径字符。"))
             return
-        deleted, unbound, error = await self._remove_account(valid)
+        deleted, error = await self._remove_account(valid)
         if error is not None:
             await event.send(event.plain_result(error))
             return
@@ -159,22 +171,20 @@ class QQAgentlyMailPlugin(Star):
             await event.send(event.plain_result(f"账号 {valid} 没有已保存的凭证。"))
             return
         await event.send(
-            event.plain_result(
-                f"已删除账号 {valid} 的凭证，并解除 {unbound} 个会话的绑定。",
-            ),
+            event.plain_result(f"已删除账号 {valid} 的凭证。"),
         )
+
     @agently_group.command("status")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def status(self, event: AstrMessageEvent):
-        """列出全部账号并标注当前会话的绑定"""
+        """列出全部已登录账号与当前会话的访问控制状态"""
         snapshot = await self._account_snapshot(event.unified_msg_origin)
-        current = snapshot["current_binding"]
         lines = []
         for item in snapshot["accounts"]:
             if "invalid" in item:
                 lines.append(f"- {item['account']}：凭证文件无效（{item['invalid']}）")
                 continue
-            mark = "（当前会话绑定）" if item["account"] == current else ""
+            mark = "（默认账号）" if item["account"] == "default" else ""
             lines.append(
                 f"- {item['account']}{mark}：邮箱 {item['email']}，"
                 f"凭证有效期至 {item['expires_at']}，app_id {item['app_id'] or '未知'}",
@@ -183,78 +193,16 @@ class QQAgentlyMailPlugin(Star):
         if lines:
             parts.append("已保存凭证的账号：\n" + "\n".join(lines))
         else:
-            parts.append("还没有任何账号凭证，请执行 /agently login。")
-        if current is not None:
-            parts.append(f"当前会话绑定账号：{current}。")
-        else:
-            parts.append("当前会话未绑定账号。")
+            parts.append("还没有任何账号凭证，请在 WebUI「邮局」扫码或执行 /agently login。")
+        mode_label = "白名单" if snapshot["umo_filter_mode"] == "whitelist" else "黑名单"
+        in_list_label = "在" if snapshot["umo_in_list"] else "不在"
+        parts.append(
+            f"会话访问控制：{mode_label}模式（列表共 {snapshot['umo_filter_count']} 个会话，"
+            f"当前会话{in_list_label}列表中）。"
+        )
         if snapshot["login_in_flight"]:
             parts.append("当前会话有登录在途，请等待结果推送。")
         await event.send(event.plain_result("\n".join(parts)))
-
-    @agently_group.command("bind")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def bind(self, event: AstrMessageEvent, account: str):
-        """把当前会话绑定到指定账号"""
-        valid = self._validate_account_name(account)
-        if valid is None:
-            logger.warning("[agently] 绑定失败：账号名含非法字符或超长")
-            await event.send(event.plain_result("账号名无效：不能为空、超过 64 字符或包含非法路径字符。"))
-            return
-        account = valid
-        try:
-            bundle = await self._token_store.load(account)
-        except TokenStoreError as exc:
-            logger.warning(f"[agently] 绑定失败：账号={account}，异常={type(exc).__name__}")
-            await event.send(
-                event.plain_result(
-                    f"账号 {account} 的凭证文件无效，请重新执行 /agently login {account}。",
-                ),
-            )
-            return
-        if bundle is None:
-            logger.warning(f"[agently] 绑定失败：账号={account}，原因=凭证不存在")
-            await event.send(
-                event.plain_result(
-                    f"账号 {account} 没有已保存的凭证，请先执行 /agently login {account}。",
-                ),
-            )
-            return
-        bindings = await self._load_bindings()
-        umo = event.unified_msg_origin
-        previous = bindings.get(umo)
-        if previous != account:
-            logger.debug(
-                f"[agently] 绑定账号变化，准备停止旧监听：账号={account}，原账号={previous}"
-            )
-            _, error = await self._stop_watch(umo)
-            if error is not None:
-                await event.send(event.plain_result(f"绑定失败：{error}"))
-                return
-        bindings[umo] = account
-        await self._save_bindings(bindings)
-        logger.info(f"[agently] 会话绑定完成：账号={account}，绑定数量={len(bindings)}")
-        await event.send(event.plain_result(f"已把当前会话绑定到账号 {account}。"))
-
-    @agently_group.command("unbind")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def unbind(self, event: AstrMessageEvent):
-        """解除当前会话的账号绑定"""
-        bindings = await self._load_bindings()
-        umo = event.unified_msg_origin
-        account = bindings.get(umo)
-        _, error = await self._stop_watch(umo)
-        if error is not None:
-            await event.send(event.plain_result(f"解除绑定失败：{error}"))
-            return
-        if account is None:
-            logger.debug("[agently] 解除绑定跳过：当前会话未绑定账号")
-            await event.send(event.plain_result("当前会话未绑定账号。"))
-            return
-        bindings.pop(umo, None)
-        await self._save_bindings(bindings)
-        logger.info(f"[agently] 会话解绑完成：账号={account}，绑定数量={len(bindings)}")
-        await event.send(event.plain_result(f"已解除当前会话与账号 {account} 的绑定。"))
 
     def _clients_for(self, account: str) -> tuple[AgentlyMailClient, OAuthClient]:
         """返回账号的客户端对，按需创建并缓存。"""
@@ -501,11 +449,11 @@ class QQAgentlyMailPlugin(Star):
                 f"账号 {account} 登录失败：发生未预期的错误（{exc}），详情见插件日志。",
             )
         else:
-            logger.info(f"[agently] 登录授权完成，开始收尾绑定：账号={account}")
+            logger.info(f"[agently] 登录授权完成，开始收尾回推：账号={account}")
             try:
                 await self._announce_login_success(umo, account, bundle, client)
             except Exception:
-                logger.exception(f"账号 {account} 登录成功后的回推或绑定失败")
+                logger.exception(f"账号 {account} 登录成功后的收尾回推失败")
                 await self._push(
                     umo,
                     f"账号 {account} 登录成功，但收尾步骤出错，"
@@ -608,21 +556,8 @@ class QQAgentlyMailPlugin(Star):
         bundle: TokenBundle,
         client: AgentlyMailClient,
     ) -> None:
-        """登录成功后绑定发起会话、读取邮箱信息并回推。"""
-        # 凭证已在 poll 内保存，切换绑定前先清理当前会话的旧监听。
-        bindings = await self._load_bindings()
-        if bindings.get(umo) != account:
-            _, error = await self._stop_watch(umo)
-            if error is not None:
-                await self._push(
-                    umo,
-                    f"账号 {account} 登录成功，但切换会话绑定失败：{error}\n"
-                    "未修改当前会话绑定。",
-                )
-                return
-        bindings[umo] = account
-        await self._save_bindings(bindings)
-        logger.info(f"[agently] 登录成功并绑定会话：账号={account}")
+        """登录成功后读取邮箱信息并回推。"""
+        logger.info(f"[agently] 登录授权完成：账号={account}")
         try:
             me = await client.me()
         except ClientError as exc:
@@ -633,8 +568,7 @@ class QQAgentlyMailPlugin(Star):
             await self._push(
                 umo,
                 f"账号 {account} 登录成功：app_id {bundle.app_id or '未知'}，"
-                f"但读取邮箱信息失败：{exc}\n"
-                f"已自动把当前会话绑定到账号 {account}。",
+                f"但读取邮箱信息失败：{exc}",
             )
             return
         self._me_cache[account] = me
@@ -646,8 +580,7 @@ class QQAgentlyMailPlugin(Star):
         await self._push(
             umo,
             f"账号 {account} 登录成功：邮箱 {email}（app_id {bundle.app_id or '未知'}）\n"
-            f"限额 {limits}\n"
-            f"已自动把当前会话绑定到账号 {account}。",
+            f"限额 {limits}",
         )
 
     async def _stop_watches_for_account(self, account: str) -> list[str]:
@@ -688,44 +621,32 @@ class QQAgentlyMailPlugin(Star):
             errors.append(config_error)
         return errors
 
-    async def _remove_account(self, account: str) -> tuple[bool, int, str | None]:
-        """先清理监听，再删除凭证和绑定，并返回明确清理错误。"""
+    async def _remove_account(self, account: str) -> tuple[bool, str | None]:
+        """先清理监听，再删除凭证，并返回明确清理错误。"""
         valid = self._validate_account_name(account)
         if valid is None:
-            return False, 0, "账号名无效：不能为空、超过 64 字符或包含非法路径字符。"
+            return False, "账号名无效：不能为空、超过 64 字符或包含非法路径字符。"
         account = valid
         logger.debug(f"[agently] 账号登出开始：账号={account}")
         cleanup_errors = await self._stop_watches_for_account(account)
         if cleanup_errors:
             return (
                 False,
-                0,
                 f"账号 {account} 登出失败：{'；'.join(cleanup_errors)}",
             )
 
         logger.debug(f"[agently] 账号监听清理完成：账号={account}")
         if not await self._token_store.delete(account):
-            return False, 0, None
+            return False, None
         self._clients.pop(account, None)
         self._me_cache.pop(account, None)
-        bindings = await self._load_bindings()
-        referenced = [
-            bound_umo
-            for bound_umo, bound_account in bindings.items()
-            if bound_account == account
-        ]
-        for bound_umo in referenced:
-            del bindings[bound_umo]
-        await self._save_bindings(bindings)
-        logger.info(
-            f"[agently] 账号登出完成：账号={account}，解除绑定数量={len(referenced)}"
-        )
-        return True, len(referenced), None
+        logger.info(f"[agently] 账号登出完成：账号={account}")
+        return True, None
 
     async def _account_snapshot(self, umo: str) -> dict:
-        """枚举账号凭证与当前会话的绑定状态，供命令与工具共用。"""
+        """枚举账号凭证与当前会话的访问控制状态，供命令与工具共用。"""
         accounts = await self._token_store.list_accounts()
-        bindings = await self._load_bindings()
+        mode, umos = self._umo_filter_config()
         items = []
         for account in accounts:
             try:
@@ -748,7 +669,10 @@ class QQAgentlyMailPlugin(Star):
             )
         return {
             "accounts": items,
-            "current_binding": bindings.get(umo),
+            "default_account": "default",
+            "umo_filter_mode": mode,
+            "umo_filter_count": len(umos),
+            "umo_in_list": umo in umos,
             "login_in_flight": await self._registry.in_flight(umo),
         }
 
@@ -1056,7 +980,7 @@ class QQAgentlyMailPlugin(Star):
         return None
 
     async def _restore_watches(self) -> None:
-        """恢复仍有会话绑定的监听配置，逐条记录失败原因。"""
+        """恢复已持久化的监听配置，黑名单会话跳过，逐条记录失败原因。"""
         async with self._watch_config_lock:
             configs = await self._read_watch_configs_locked()
         if configs is None:
@@ -1066,18 +990,17 @@ class QQAgentlyMailPlugin(Star):
         restored = 0
         failed = 0
         skipped = 0
-        bindings = await self._load_bindings()
+        mode, umos = self._umo_filter_config()
         logger.debug(f"[agently] 监听恢复开始：配置数量={len(configs)}")
         for umo, raw_config in configs.items():
             config = self._validate_watch_config(umo, raw_config)
             if config is None:
                 skipped += 1
                 continue
-            bound_account = bindings.get(umo)
-            if not isinstance(bound_account, str) or not bound_account:
+            if mode == "blacklist" and umo in umos:
                 skipped += 1
                 logger.warning(
-                    f"会话 {umo} 没有账号绑定，保留账号 {config['account']} 的监听配置"
+                    f"会话 {umo} 在黑名单中，跳过恢复账号 {config['account']} 的监听配置"
                 )
                 continue
             try:
@@ -1285,18 +1208,6 @@ class QQAgentlyMailPlugin(Star):
         if primary.email:
             return primary.email
         return primary.alias_id
-
-    async def _load_bindings(self) -> dict[str, str]:
-        """读取会话到账号的绑定表。"""
-        bindings = await self.get_kv_data(BINDINGS_KEY, {}) or {}
-        logger.debug(f"[agently] 绑定表读取完成：键={BINDINGS_KEY}，数量={len(bindings)}")
-        return bindings
-
-    async def _save_bindings(self, bindings: dict[str, str]) -> None:
-        """整体写回会话到账号的绑定表。"""
-        logger.debug(f"[agently] 绑定表保存开始：键={BINDINGS_KEY}，数量={len(bindings)}")
-        await self.put_kv_data(BINDINGS_KEY, bindings)
-        logger.debug(f"[agently] 绑定表保存完成：键={BINDINGS_KEY}，数量={len(bindings)}")
 
     async def _push(self, umo: str, text: str) -> bool:
         """向指定会话主动推送文本，并返回是否发送成功。"""
