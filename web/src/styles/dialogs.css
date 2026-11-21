@@ -215,6 +215,74 @@
   margin-top: 0;
   padding: 12px 22px 0;
 }
+.mailbox-row-actions {
+  flex: 0 0 auto !important;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mailbox-edit-box {
+  flex: 1;
+  min-width: 0;
+}
+.mailbox-create-box {
+  padding: 0 22px 16px;
+}
+.alias-prefix-group {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+  transition: border-color 140ms ease;
+}
+.alias-prefix-group:focus-within {
+  border-color: var(--accent);
+}
+.alias-prefix-group.invalid {
+  border-color: var(--danger);
+}
+.alias-prefix-group input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  outline: none;
+}
+.alias-prefix-suffix {
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  border-left: 1px solid var(--line);
+  background: var(--surface-subtle);
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  user-select: none;
+}
+.alias-prefix-hint {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.alias-prefix-hint.error {
+  color: var(--danger);
+}
+.button.ghost {
+  background: transparent;
+  color: var(--ink-soft);
+  border: 1px solid transparent;
+}
+.button.ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
 .risk-list {
   margin: 14px 0 0;
   padding-left: 18px;

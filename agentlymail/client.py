@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import ipaddress
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -32,6 +33,47 @@ from .token_store import TokenStore
 # 别名管理端点在 agent.qq.com 主站，直接认 OAuth Bearer，不走 API 子域。
 MGR_URL = "https://agent.qq.com/agent/mgr"
 GETACCOUNT_URL = "https://agent.qq.com/agent/getaccount"
+ALIAS_DOMAIN = "@agent.qq.com"
+_ALIAS_PREFIX_RE = re.compile(r"^[a-z][a-z0-9]{5,17}$")
+_MGR_ERROR_MESSAGES: dict[str, str] = {
+    "-75103": "该邮箱地址不可修改",
+    "-75104": "该邮箱地址已被占用",
+    "-75105": "今日检测次数已用完",
+}
+
+
+def normalize_alias_email(value: str) -> str:
+    """规范化并校验邮箱地址前缀或完整地址，返回 `<prefix>@agent.qq.com`。"""
+    if not isinstance(value, str):
+        raise ClientError(
+            "邮箱前缀必须是字符串",
+            status_code=400,
+            code="INVALID_ALIAS",
+        )
+    text = value.strip().lower()
+    if not text:
+        raise ClientError(
+            "邮箱前缀不能为空",
+            status_code=400,
+            code="INVALID_ALIAS",
+        )
+    if "@" in text:
+        prefix, _, domain = text.partition("@")
+        if f"@{domain}" != ALIAS_DOMAIN:
+            raise ClientError(
+                f"邮箱地址后缀必须是 {ALIAS_DOMAIN}",
+                status_code=400,
+                code="INVALID_ALIAS",
+            )
+    else:
+        prefix = text
+    if not _ALIAS_PREFIX_RE.fullmatch(prefix):
+        raise ClientError(
+            "邮箱前缀须以字母开头，长度为 6-18 位小写字母或数字",
+            status_code=400,
+            code="INVALID_ALIAS",
+        )
+    return f"{prefix}{ALIAS_DOMAIN}"
 
 # 附件下载单次内存上限（略高于协议 20MB 附件限制，防止异常响应耗尽内存）。
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
@@ -675,26 +717,91 @@ class AgentlyMailClient:
             )
             raise
 
-    async def create_address(self) -> Mapping[str, Any]:
-        """新建邮箱地址：func=7 派生前缀后立即 func=2 确认绑定。"""
+    async def suggest_address(self) -> Mapping[str, Any]:
+        """获取服务端默认推荐的邮箱地址（按微信账号生成，或返回 90 天内待复用旧地址）。"""
         logger.debug(
-            f"[agently] 客户端操作开始 操作=create_address 账号={self.account}"
+            f"[agently] 客户端操作开始 操作=suggest_address 账号={self.account}"
         )
         try:
-            created = await self._mgr_post(MGR_URL, {"func": "7"}, "创建邮箱地址")
+            created = await self._mgr_post(MGR_URL, {"func": "7"}, "获取推荐邮箱地址")
             alias = created.get("alias")
             if not isinstance(alias, str) or not alias:
-                raise ClientError("创建邮箱地址响应缺少 alias", details=created)
+                raise ClientError("获取推荐邮箱地址响应缺少 alias", details=created)
+            result = {
+                "alias": alias,
+                "prefix": alias.split("@", 1)[0],
+                "is_reused": bool(created.get("is_reused", False)),
+            }
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=suggest_address "
+                f"账号={self.account} 是否复用={result['is_reused']}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=suggest_address "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
+
+    async def check_address(self, prefix: str) -> Mapping[str, Any]:
+        """检查自定义邮箱地址前缀是否可用。"""
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=check_address 账号={self.account}"
+        )
+        try:
+            new_alias = normalize_alias_email(prefix)
+            body = await self._mgr_post(
+                MGR_URL, {"func": "8", "new_alias": new_alias}, "检查邮箱地址"
+            )
+            result = {
+                "alias": new_alias,
+                "available": bool(body.get("alias_available", False)),
+            }
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=check_address "
+                f"账号={self.account} 可用={result['available']}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=check_address "
+                f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
+
+    async def create_address(self, prefix: str | None = None) -> Mapping[str, Any]:
+        """新建邮箱地址：支持自定义前缀，缺省时由 func=7 获取默认前缀再 func=2 绑定。"""
+        custom_prefix = prefix.strip() if isinstance(prefix, str) and prefix.strip() else None
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=create_address 账号={self.account} "
+            f"自定义前缀={custom_prefix is not None}"
+        )
+        try:
+            is_reused = False
+            if custom_prefix is not None:
+                alias = normalize_alias_email(custom_prefix)
+            else:
+                created = await self._mgr_post(MGR_URL, {"func": "7"}, "创建邮箱地址")
+                raw_alias = created.get("alias")
+                if not isinstance(raw_alias, str) or not raw_alias:
+                    raise ClientError("创建邮箱地址响应缺少 alias", details=created)
+                alias = raw_alias
+                is_reused = bool(created.get("is_reused", False))
             bound = await self._mgr_post(
                 MGR_URL, {"func": "2", "new_alias": alias}, "绑定邮箱地址"
             )
             alias_id = bound.get("alias_id")
             if not isinstance(alias_id, str) or not alias_id:
                 raise ClientError("绑定邮箱地址响应缺少 alias_id", details=bound)
+            bound_alias = bound.get("alias")
+            final_alias = (
+                bound_alias if isinstance(bound_alias, str) and bound_alias else alias
+            )
             result = {
-                "alias": alias,
+                "alias": final_alias,
                 "alias_id": alias_id,
-                "is_reused": created.get("is_reused", False),
+                "is_reused": is_reused or bool(bound.get("is_reused", False)),
             }
             logger.debug(
                 f"[agently] 客户端操作完成 操作=create_address "
@@ -706,6 +813,43 @@ class AgentlyMailClient:
             logger.debug(
                 f"[agently] 客户端操作失败 操作=create_address "
                 f"账号={self.account} 异常={type(exc).__name__}"
+            )
+            raise
+
+    async def modify_address(self, alias_id: str, prefix: str) -> Mapping[str, Any]:
+        """修改已有邮箱地址的前缀（func=9）。"""
+        logger.debug(
+            f"[agently] 客户端操作开始 操作=modify_address 账号={self.account} "
+            f"地址ID={alias_id}"
+        )
+        try:
+            self._require_identifier(alias_id, "alias_id")
+            new_alias = normalize_alias_email(prefix)
+            body = await self._mgr_post(
+                MGR_URL,
+                {"func": "9", "alias_id": alias_id, "new_alias": new_alias},
+                "修改邮箱地址",
+            )
+            updated_alias = body.get("alias")
+            final_alias = (
+                updated_alias
+                if isinstance(updated_alias, str) and updated_alias
+                else new_alias
+            )
+            self._me = None
+            result = {
+                "alias_id": alias_id,
+                "alias": final_alias,
+            }
+            logger.debug(
+                f"[agently] 客户端操作完成 操作=modify_address "
+                f"账号={self.account} 地址ID={alias_id}"
+            )
+            return result
+        except Exception as exc:
+            logger.debug(
+                f"[agently] 客户端操作失败 操作=modify_address "
+                f"账号={self.account} 地址ID={alias_id} 异常={type(exc).__name__}"
             )
             raise
 
@@ -826,9 +970,15 @@ class AgentlyMailClient:
             )
         ret = head.get("ret")
         if response.is_error or isinstance(ret, bool) or ret not in (0, "0"):
+            ret_code = str(ret)
             msg = head.get("msg")
-            message = msg if isinstance(msg, str) and msg else f"ret={ret}"
-            if str(ret) == "-20002":
+            mapped = _MGR_ERROR_MESSAGES.get(ret_code)
+            message = (
+                msg
+                if isinstance(msg, str) and msg
+                else (mapped if mapped is not None else f"ret={ret}")
+            )
+            if ret_code == "-20002":
                 message = f"登录态失效（{message}）"
             logger.debug(
                 f"[agently] 客户端管理响应失败 操作={operation} "
@@ -837,7 +987,7 @@ class AgentlyMailClient:
             raise ClientError(
                 f"{operation}失败: {message}",
                 status_code=response.status_code,
-                code=str(ret),
+                code=ret_code,
                 details=payload,
             )
         body = payload.get("body")

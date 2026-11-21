@@ -8,6 +8,7 @@ import type {
   DeleteAddressResult,
   DisplayAccount,
   Me,
+  ModifyAddressResult,
   QuotaView,
 } from "../types/mail";
 import { decorateAccount } from "../utils/display";
@@ -150,8 +151,8 @@ export function useAccounts(api: MailApi, notify: Notify) {
     if (account === accountId.value) await loadMe(account);
   }
 
-  async function createAlias(account: string): Promise<CreateAddressResult> {
-    const result = await api.createAddress(account);
+  async function createAlias(account: string, prefix?: string): Promise<CreateAddressResult> {
+    const result = await api.createAddress(account, prefix);
     await applyAliasWrite(account, result.aliases, result.refresh_required);
     if (account === accountId.value && !currentAlias.value) {
       aliasId.value = result.alias.alias_id;
@@ -162,6 +163,19 @@ export function useAccounts(api: MailApi, notify: Notify) {
         ? t("mailboxDialog.reusedToast", { email })
         : t("mailboxDialog.createdToast", { email }),
     );
+    if (result.refresh_error) notify(result.refresh_error);
+    return result;
+  }
+
+  async function modifyAlias(
+    account: string,
+    targetAliasId: string,
+    prefix: string,
+  ): Promise<ModifyAddressResult> {
+    const result = await api.modifyAddress(account, targetAliasId, prefix);
+    await applyAliasWrite(account, result.aliases, result.refresh_required);
+    const email = result.alias.email ?? result.alias.alias_id;
+    notify(t("mailboxDialog.modifiedToast", { email }));
     if (result.refresh_error) notify(result.refresh_error);
     return result;
   }
@@ -198,6 +212,7 @@ export function useAccounts(api: MailApi, notify: Notify) {
     selectAddress,
     selectDefaultAccount,
     createAlias,
+    modifyAlias,
     deleteAlias,
   };
 }

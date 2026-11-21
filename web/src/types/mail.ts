@@ -118,6 +118,13 @@ export interface CreateAddressResult {
   refresh_error: string | null;
 }
 
+export interface ModifyAddressResult {
+  alias: Alias;
+  aliases: Alias[] | null;
+  refresh_required: boolean;
+  refresh_error: string | null;
+}
+
 export interface DeleteAddressResult {
   alias_id: string;
   aliases: Alias[] | null;

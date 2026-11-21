@@ -52,6 +52,7 @@ const {
   selectAddress,
   selectDefaultAccount,
   createAlias,
+  modifyAlias,
   deleteAlias,
 } = accountStore;
 
@@ -153,6 +154,7 @@ const deleteTarget = shallowRef<Alias | null>(null);
 const managedMe = shallowRef<Me | null>(null);
 const managedMeLoading = shallowRef(false);
 const createLoading = shallowRef(false);
+const modifyLoading = shallowRef(false);
 const deleteLoading = shallowRef(false);
 const trashLoading = shallowRef(false);
 const downloading = shallowRef(false);
@@ -277,12 +279,12 @@ function onRelogin(targetAccount?: string) {
   openLogin(targetAccount || "default", Boolean(targetAccount));
 }
 
-async function onCreateAlias() {
+async function onCreateAlias(prefix?: string) {
   const account = manageAccountId.value;
   if (!account || createLoading.value) return;
   createLoading.value = true;
   try {
-    await createAlias(account);
+    await createAlias(account, prefix);
     if (account === accountId.value) {
       resetView();
       selectedMessageId.value = null;
@@ -291,6 +293,19 @@ async function onCreateAlias() {
     notify(errorMessage(error));
   } finally {
     createLoading.value = false;
+  }
+}
+
+async function onModifyAlias(target: Alias, prefix: string) {
+  const account = manageAccountId.value;
+  if (!account || modifyLoading.value) return;
+  modifyLoading.value = true;
+  try {
+    await modifyAlias(account, target.alias_id, prefix);
+  } catch (error) {
+    notify(errorMessage(error));
+  } finally {
+    modifyLoading.value = false;
   }
 }
 
@@ -550,9 +565,11 @@ onUnmounted(() => {
       :account="managedAccount"
       :alias-limit="managedAliasLimit"
       :loading="createLoading"
+      :modify-loading="modifyLoading"
       :me-loading="managedMeLoading"
       @close="mailboxDialogOpen = false"
       @create="onCreateAlias"
+      @modify-alias="onModifyAlias"
       @delete-alias="onRequestDelete"
     />
     <DeleteAliasDialog

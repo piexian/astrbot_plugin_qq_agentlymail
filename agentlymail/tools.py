@@ -1060,7 +1060,8 @@ class AgentlyMailAdminTool(FunctionTool):
                 "trash 把邮件移入垃圾箱；empty_trash 清空垃圾箱；"
                 "permanent_delete 永久删除邮件；"
                 "addresses 列出全部邮箱地址、昵称与别名配额；"
-                "create_address 新建邮箱地址，前缀由服务端派生，不可指定；"
+                "create_address 新建邮箱地址，可选填 prefix 自定义前缀（留空默认按微信账号生成；若 90 天内有刚注销的地址会自动复用）；"
+                "modify_address 修改已有邮箱地址的前缀（需 alias_id 与 prefix）；"
                 "delete_address 注销邮箱地址：不可恢复、邮件全删、已绑定 Agent 自动解绑，"
                 "90 天保留期内新建地址会复用旧地址，执行前必须向用户确认。"
             ),
@@ -1077,12 +1078,16 @@ class AgentlyMailAdminTool(FunctionTool):
                             "permanent_delete",
                             "addresses",
                             "create_address",
+                            "modify_address",
                             "delete_address",
                         ],
                     ),
                     "account": string_param("目标账号名，默认 default", default="default"),
                     "message_id": string_param("trash/permanent_delete 的邮件 ID"),
-                    "alias_id": string_param("delete_address 要注销的地址 ID，可先用 addresses 查看"),
+                    "alias_id": string_param("modify_address/delete_address 的目标地址 ID，可先用 addresses 查看"),
+                    "prefix": string_param(
+                        "create_address（可选）或 modify_address（必填）的邮箱前缀，以字母开头，6-18 位小写字母或数字"
+                    ),
                 },
                 required=["action"],
             ),
@@ -1097,6 +1102,7 @@ class AgentlyMailAdminTool(FunctionTool):
             "permanent_delete": self._permanent_delete,
             "addresses": self._addresses,
             "create_address": self._create_address,
+            "modify_address": self._modify_address,
             "delete_address": self._delete_address,
         }
 
@@ -1276,16 +1282,54 @@ class AgentlyMailAdminTool(FunctionTool):
         account, failure = await self._resolve_admin_account(kwargs)
         if failure is not None or account is None:
             return failure
+        raw_prefix = kwargs.get("prefix")
+        prefix: str | None = None
+        if raw_prefix is not None:
+            if not isinstance(raw_prefix, str):
+                return error_result("prefix 必须是字符串")
+            stripped = raw_prefix.strip()
+            if stripped:
+                prefix = stripped
         client, _ = self._plugin._clients_for(account)
-        created = await client.create_address()
+        created = await client.create_address(prefix=prefix)
         return ok_result(
             {
                 "account": account,
                 **created,
                 "message": (
-                    "已创建并绑定新邮箱地址。前缀由服务端派生，无法指定；"
+                    "已创建并绑定新邮箱地址；"
                     "is_reused 为 true 表示复用了 90 天注销保留期内的旧地址。"
                 ),
+            }
+        )
+
+    async def _modify_address(
+        self,
+        event: AstrMessageEvent,
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
+        account, failure = await self._resolve_admin_account(kwargs)
+        if failure is not None or account is None:
+            return failure
+        alias_id = _required_text(kwargs, "alias_id")
+        if alias_id is None:
+            return error_result(
+                "缺少 alias_id 参数",
+                "可先用 action=addresses 查看要修改地址的 alias_id。",
+            )
+        prefix = _required_text(kwargs, "prefix")
+        if prefix is None:
+            return error_result(
+                "缺少 prefix 参数",
+                "邮箱前缀须以字母开头，长度为 6-18 位小写字母或数字。",
+            )
+        client, _ = self._plugin._clients_for(account)
+        updated = await client.modify_address(alias_id, prefix)
+        return ok_result(
+            {
+                "account": account,
+                **updated,
+                "message": f"已将邮箱地址修改为 {updated['alias']}。",
             }
         )
 

@@ -12,6 +12,7 @@ import type {
   Me,
   Message,
   MessageSummary,
+  ModifyAddressResult,
   OutboundAttachment,
   Page,
   ReplyResult,
@@ -90,7 +91,8 @@ export interface MailApi {
   send(params: SendParams): Promise<SendResult>;
   reply(params: ReplyParams): Promise<ReplyResult>;
   forward(params: ForwardParams): Promise<ForwardResult>;
-  createAddress(account: string): Promise<CreateAddressResult>;
+  createAddress(account: string, prefix?: string): Promise<CreateAddressResult>;
+  modifyAddress(account: string, aliasId: string, prefix: string): Promise<ModifyAddressResult>;
   deleteAddress(account: string, aliasId: string): Promise<DeleteAddressResult>;
   loginStart(account: string): Promise<WebLoginSession>;
   loginStatus(sessionId: string): Promise<WebLoginSession>;
@@ -134,8 +136,19 @@ export function createMailApi(bridge: AstrBotBridge): MailApi {
     forward(params) {
       return bridge.apiPost<ForwardResult>("forward", { ...params });
     },
-    createAddress(account) {
-      return bridge.apiPost<CreateAddressResult>("create_address", { account });
+    createAddress(account, prefix) {
+      const cleaned = prefix?.trim();
+      return bridge.apiPost<CreateAddressResult>(
+        "create_address",
+        cleaned ? { account, prefix: cleaned } : { account },
+      );
+    },
+    modifyAddress(account, aliasId, prefix) {
+      return bridge.apiPost<ModifyAddressResult>("modify_address", {
+        account,
+        alias_id: aliasId,
+        prefix: prefix.trim(),
+      });
     },
     deleteAddress(account, aliasId) {
       return bridge.apiPost<DeleteAddressResult>("delete_address", {

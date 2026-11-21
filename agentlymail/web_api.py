@@ -147,11 +147,11 @@ async def _timed(awaitable: Awaitable[T], seconds: float, *, write: bool = False
 def _client_error_response(exc: ClientError):
     """把协议客户端错误映射为安全 HTTP 响应，不泄漏 details 与下载地址。"""
     status = exc.status_code
-    if status == 401:
+    if status == 401 or exc.code == "-20002":
         return error_response("凭证失效，请在聊天中重新执行 /agently login。", status_code=401)
     if status == 404:
         return error_response("邮件或附件不存在。", status_code=404)
-    if status in (400, 422):
+    if status in (400, 422) or exc.code in {"INVALID_ALIAS", "-75103", "-75104", "-75105"}:
         return error_response(
             str(exc), status_code=400, data={"code": exc.code} if exc.code else None
         )
@@ -1152,15 +1152,29 @@ class MailWebApi:
 
     @_guarded
     async def create_address(self) -> Any:
-        """新建邮箱地址，写成功后刷新身份失败时仍返回写结果。"""
+        """新建邮箱地址（支持可选自定义前缀），写成功后刷新身份失败时仍返回写结果。"""
         payload = await _read_json_body()
         account = _body_str(payload, "account")
+        raw_prefix = payload.get("prefix")
+        prefix: str | None = None
+        if raw_prefix is not None:
+            if not isinstance(raw_prefix, str):
+                raise WebApiError("字段 prefix 必须是字符串。")
+            stripped = raw_prefix.strip()
+            if stripped:
+                prefix = stripped
         client, _bundle = await self._resolve_account(account)
-        result = await _timed(client.create_address(), WRITE_TIMEOUT, write=True)
+        call = (
+            client.create_address(prefix=prefix)
+            if prefix is not None
+            else client.create_address()
+        )
+        result = await _timed(call, WRITE_TIMEOUT, write=True)
         alias_id = result.get("alias_id")
         me, refresh_error = await self._refresh_me_after_write(account, client)
         logger.info(
             f"[agently] Web 邮箱地址创建成功：账号={account}，地址ID={alias_id}，"
+            f"自定义前缀={prefix is not None}，"
             f"是否复用={bool(result.get('is_reused', False))}，刷新降级={me is None}"
         )
         aliases = [_alias_dict(a) for a in me.aliases] if me is not None else None
@@ -1179,6 +1193,43 @@ class MailWebApi:
             {
                 "alias": alias_view,
                 "reused": bool(result.get("is_reused", False)),
+                "aliases": aliases,
+                "refresh_required": me is None,
+                "refresh_error": refresh_error,
+            }
+        )
+
+    @_guarded
+    async def modify_address(self) -> Any:
+        """修改已有邮箱地址前缀，刷新失败时降级返回写结果。"""
+        payload = await _read_json_body()
+        account = _body_str(payload, "account")
+        client, _bundle = await self._resolve_account(account)
+        alias_id = await self._resolve_alias(client, _body_str(payload, "alias_id"))
+        prefix = _body_str(payload, "prefix")
+        result = await _timed(
+            client.modify_address(alias_id, prefix), WRITE_TIMEOUT, write=True
+        )
+        me, refresh_error = await self._refresh_me_after_write(account, client)
+        logger.info(
+            f"[agently] Web 邮箱地址修改成功：账号={account}，地址ID={alias_id}，"
+            f"刷新降级={me is None}"
+        )
+        aliases = [_alias_dict(a) for a in me.aliases] if me is not None else None
+        alias = None
+        if me is not None:
+            alias = next((a for a in me.aliases if a.alias_id == alias_id), None)
+        if alias is not None:
+            alias_view = _alias_dict(alias)
+        else:
+            alias_view = {
+                "alias_id": alias_id,
+                "email": result.get("alias"),
+                "is_primary": False,
+            }
+        return json_response(
+            {
+                "alias": alias_view,
                 "aliases": aliases,
                 "refresh_required": me is None,
                 "refresh_error": refresh_error,
@@ -1379,6 +1430,7 @@ def register_web_apis(plugin: QQAgentlyMailPlugin) -> MailWebApi:
         ("POST", "reply", api.reply, "回复邮件"),
         ("POST", "forward", api.forward, "转发邮件"),
         ("POST", "create_address", api.create_address, "新建邮箱地址"),
+        ("POST", "modify_address", api.modify_address, "修改邮箱地址前缀"),
         ("POST", "delete_address", api.delete_address, "注销邮箱地址"),
         ("POST", "login_start", api.login_start, "发起或刷新 WebUI 微信扫码登录"),
         ("GET", "login_status", api.login_status, "查询 WebUI 扫码登录状态"),
