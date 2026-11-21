@@ -69,7 +69,7 @@ jobs:
           cp -r .astrbot-plugin agentlymail docs views "$STAGE"/
           find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
           find "$STAGE" -type f -name '*.pyc' -delete
-          cp CHANGELOG.md LICENSE README.md _conf_schema.json main.py metadata.yaml "$STAGE"/
+          cp CHANGELOG.md LICENSE README.md _conf_schema.json logo.png main.py metadata.yaml "$STAGE"/
           zip -qr "${STAGE}-${{ steps.ver.outputs.tag }}.zip" "$STAGE"
           test -s "${STAGE}-${{ steps.ver.outputs.tag }}.zip"
 

@@ -126,6 +126,7 @@ AI 在对话中可以自动调用下面 3 个工具，工具启停由 AstrBot �
 astrbot_plugin_qq_agentlymail/
 ├── main.py                         # 插件入口：指令组、工具注册、监听持久化与生命周期
 ├── metadata.yaml                   # 插件元信息与视图声明
+├── logo.png                        # 插件图标
 ├── _conf_schema.json               # 插件配置项定义
 ├── README.md                       # 使用说明
 ├── CHANGELOG.md                    # 更新日志
