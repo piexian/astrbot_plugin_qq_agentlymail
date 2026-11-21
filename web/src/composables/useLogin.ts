@@ -1,4 +1,4 @@
-/** WebUI 微信扫码登录流程：发起、轮询、刷新、多邮箱选择与随时中断。 */
+/** WebUI 扫码登录流程：发起、轮询、刷新与随时中断；中断失败会显示错误并保持对话框打开。 */
 
 import { computed, onScopeDispose, shallowRef } from "vue";
 import type { MailApi } from "../api/mailApi";
@@ -8,7 +8,7 @@ import { t } from "./useHostContext";
 import type { Notify } from "./useToasts";
 
 const POLL_INTERVAL_MS = 1200;
-const ACTIVE_STATES = new Set(["waiting_scan", "scanned", "select_mail", "authorizing"]);
+const ACTIVE_STATES = new Set(["waiting_scan"]);
 
 export interface LoginDeps {
   api: MailApi;
@@ -21,7 +21,6 @@ export function useLogin(deps: LoginDeps) {
   const accountInput = shallowRef("default");
   const session = shallowRef<WebLoginSession | null>(null);
   const starting = shallowRef(false);
-  const selecting = shallowRef(false);
   const cancelling = shallowRef(false);
   const localError = shallowRef<string | null>(null);
 
@@ -82,7 +81,6 @@ export function useLogin(deps: LoginDeps) {
     session.value = null;
     localError.value = null;
     starting.value = false;
-    selecting.value = false;
     cancelling.value = false;
     open.value = true;
     if (autoStart) {
@@ -119,57 +117,56 @@ export function useLogin(deps: LoginDeps) {
     }
   }
 
-  async function refreshQr() {
+  async function refreshLink() {
     if (starting.value || cancelling.value) return;
     await startLogin();
   }
-
-  async function selectMail(email: string) {
-    const current = session.value;
-    if (!current || current.state !== "select_mail" || selecting.value) return;
-    const token = flowToken;
-    selecting.value = true;
-    localError.value = null;
-    try {
-      const updated = await deps.api.loginSelect(current.session_id, email);
-      if (token !== flowToken) return;
-      session.value = updated;
-      if (ACTIVE_STATES.has(updated.state)) {
-        schedulePoll(updated.session_id, token);
-      }
-    } catch (cause) {
-      if (token !== flowToken) return;
-      localError.value = errorMessage(cause);
-    } finally {
-      if (token === flowToken) selecting.value = false;
-    }
-  }
-
-  async function cancelLogin(keepOpen = true) {
+  /** 中断当前登录；失败时显示错误并保持会话与对话框，成功后才清空并提示。 */
+  async function cancelLogin() {
     stopPolling();
     const activeId = session.value?.session_id;
     const shouldAbortBackend = Boolean(activeId && isInFlight.value);
     flowToken += 1;
-    if (shouldAbortBackend && activeId) {
-      cancelling.value = true;
-      try {
-        await deps.api.loginCancel(activeId);
-      } catch {
-        // 中断失败不阻塞关闭对话框。
-      } finally {
-        cancelling.value = false;
-      }
-      if (keepOpen) deps.notify(t("login.cancelledToast"));
+    if (!shouldAbortBackend || !activeId) {
+      session.value = null;
+      localError.value = null;
+      return;
+    }
+    cancelling.value = true;
+    try {
+      await deps.api.loginCancel(activeId);
+    } catch (cause) {
+      localError.value = errorMessage(cause);
+      return;
+    } finally {
+      cancelling.value = false;
     }
     session.value = null;
     localError.value = null;
-    if (!keepOpen) {
-      open.value = false;
-    }
+    deps.notify(t("login.cancelledToast"));
   }
 
+  /** 关闭对话框；登录仍在途时先请求中断，中断失败则不关闭并显示错误。 */
   async function closeLogin() {
-    await cancelLogin(false);
+    stopPolling();
+    const activeId = session.value?.session_id;
+    if (!activeId || !isInFlight.value) {
+      open.value = false;
+      return;
+    }
+    flowToken += 1;
+    cancelling.value = true;
+    try {
+      await deps.api.loginCancel(activeId);
+    } catch (cause) {
+      localError.value = errorMessage(cause);
+      return;
+    } finally {
+      cancelling.value = false;
+    }
+    session.value = null;
+    localError.value = null;
+    open.value = false;
   }
 
   onScopeDispose(() => {
@@ -184,14 +181,12 @@ export function useLogin(deps: LoginDeps) {
     accountInput,
     session,
     starting,
-    selecting,
     cancelling,
     localError,
     isInFlight,
     openLogin,
     startLogin,
-    refreshQr,
-    selectMail,
+    refreshLink,
     cancelLogin,
     closeLogin,
   };

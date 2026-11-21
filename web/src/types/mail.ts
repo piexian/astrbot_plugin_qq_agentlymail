@@ -70,7 +70,7 @@ export interface Me {
 }
 
 export interface Page<T> {
-  data: T[];
+  items: T[];
   has_more: boolean;
   next_cursor?: string | null;
 }
@@ -153,32 +153,15 @@ export interface QuotaView {
   totalAttachment: string;
 }
 
-export type LoginState =
-  | "waiting_scan"
-  | "scanned"
-  | "select_mail"
-  | "authorizing"
-  | "success"
-  | "expired"
-  | "cancelled"
-  | "error";
-
-export interface LoginMailOption {
-  email: string;
-  is_selected: boolean;
-}
+export type LoginState = "waiting_scan" | "success" | "expired" | "cancelled" | "error";
 
 export interface WebLoginSession {
   session_id: string;
   account: string;
-  mode: "qr" | "browser";
   state: LoginState;
-  qr_image: string | null;
-  qr_expired: boolean;
   browser_url: string;
   input_code: string;
   expires_at: string;
-  mails: LoginMailOption[] | null;
   email: string | null;
   error: string | null;
   error_code: string | null;

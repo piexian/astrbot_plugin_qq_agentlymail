@@ -1072,7 +1072,7 @@ class AgentlyMailAdminTool(FunctionTool):
             name="agently_mail_admin",
             description=(
                 "管理员专用：管理 QQ Agently Mail 账号、邮件删除与邮箱地址。"
-                "action=login 发起微信扫码登录，二维码、链接和验证码会发到本会话；多邮箱账号会要求回复编号；"
+                "action=login 发起扫码登录，授权链接会发到本会话，等待期间回复「取消」可终止；"
                 "logout 删除账号凭证并停止其监听；status 列出全部账号与当前会话访问控制状态；"
                 "trash 把邮件移入垃圾箱；empty_trash 清空垃圾箱；"
                 "permanent_delete 永久删除邮件；"
@@ -1176,8 +1176,8 @@ class AgentlyMailAdminTool(FunctionTool):
             {
                 "account": account,
                 "message": (
-                    f"账号 {account} 登录已发起，二维码、链接和验证码已发送到本会话，"
-                    "请扫码并在手机上确认；如果出现多个邮箱，请回复编号；结果会自动推送。"
+                    f"账号 {account} 登录已发起，授权链接已发送到本会话，"
+                    "请在浏览器中打开并确认；等待期间可回复「取消」终止；结果会自动推送。"
                 ),
             }
         )

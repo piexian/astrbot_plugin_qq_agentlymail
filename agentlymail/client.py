@@ -223,7 +223,7 @@ class AgentlyMailClient:
             if cursor is not None:
                 params["cursor"] = cursor
             if unread:
-                params["unread"] = "true"
+                params["is_read"] = "false"
             payload = await self._request_json(
                 "GET",
                 f"/v1/aliases/{alias}/messages",
@@ -886,11 +886,48 @@ class AgentlyMailClient:
     ) -> Mapping[str, Any]:
         alias = await self._resolve_alias(alias_id)
         self._require_identifier(message_id, "message_id")
-        return await self._request_json(
-            "DELETE",
+        return await self._confirmed_delete(
             f"/v1/aliases/{alias}/messages/{message_id}{suffix}",
             operation,
         )
+
+    async def _confirmed_delete(
+        self,
+        path: str,
+        operation: str,
+    ) -> Mapping[str, Any]:
+        first = await self._request("DELETE", path)
+        first_payload = await self._response_json(first, operation)
+        if first.is_success:
+            return self._unwrap_data(first_payload)
+        code, details, message = self._error_parts(first_payload)
+        if code != "CONFIRMATION_REQUIRED":
+            raise ClientError(
+                f"{operation}失败: {message}",
+                status_code=first.status_code,
+                code=code,
+                details=details,
+            )
+        confirmation_token = details.get("confirmation_token") if isinstance(details, Mapping) else None
+        if not isinstance(confirmation_token, str) or not confirmation_token:
+            raise ClientError(
+                f"{operation}需要确认但响应缺少 confirmation_token",
+                status_code=first.status_code,
+                code=code,
+                details=details,
+            )
+        logger.debug(
+            f"[agently] 客户端删除需要确认 操作={operation} 账号={self.account}"
+        )
+        second = await self._request(
+            "DELETE",
+            path,
+            params={"confirmation_token": confirmation_token},
+        )
+        second_payload = await self._response_json(second, operation)
+        if second.is_error:
+            await self._raise_response(second, operation, second_payload)
+        return self._unwrap_data(second_payload)
 
     async def _confirmed_post(
         self,

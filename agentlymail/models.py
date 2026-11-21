@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Callable, Generic, Mapping, TypeVar
 
 
@@ -21,6 +22,35 @@ def _optional_text(value: Any) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"文本字段应为字符串，实际为 {type(value).__name__}")
     return value
+
+
+def _optional_int(value: Any, context: str) -> int | None:
+    """兼容 protojson 把 int64 序列化为十进制字符串的场景。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{context} 应为整数")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+        raise ValueError(f"{context} 应为整数")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                parsed = float(text)
+            except ValueError:
+                return None
+            if math.isfinite(parsed) and parsed.is_integer():
+                return int(parsed)
+            return None
+    raise ValueError(f"{context} 应为整数")
 
 
 def _message_id(payload: Mapping[str, Any]) -> str:
@@ -130,12 +160,13 @@ class Attachment:
         attachment_id = payload.get("attachment_id", payload.get("id"))
         if attachment_id is not None and not isinstance(attachment_id, str):
             raise ValueError("attachment_id 应为字符串")
-        size = payload.get("size")
-        if size is not None and (isinstance(size, bool) or not isinstance(size, int)):
-            raise ValueError("attachment.size 应为整数")
+        size = _optional_int(payload.get("size"), "attachment.size")
+        raw_filename = payload.get("filename")
+        if raw_filename is None:
+            raw_filename = payload.get("name")
         return cls(
             attachment_id=attachment_id,
-            filename=_optional_text(payload.get("filename")),
+            filename=_optional_text(raw_filename),
             content_type=_optional_text(payload.get("content_type")),
             size=size,
             sha1=_optional_text(payload.get("sha1")),
@@ -188,13 +219,19 @@ class Message:
     def from_payload(cls, value: Any) -> Message:
         payload = _as_mapping(value, "message")
         body = payload.get("body")
-        body_format = payload.get("body_format")
-        if not isinstance(body, str):
+        if body is None:
+            body = ""
+        elif not isinstance(body, str):
             raise ValueError("message 缺少字符串 body")
-        if not isinstance(body_format, str):
+        body_format = payload.get("body_format")
+        if body_format is None:
+            body_format = "PLAIN"
+        elif not isinstance(body_format, str):
             raise ValueError("message 缺少字符串 body_format")
-        attachments = payload.get("attachments", [])
-        if not isinstance(attachments, list):
+        attachments = payload.get("attachments")
+        if attachments is None:
+            attachments = []
+        elif not isinstance(attachments, list):
             raise ValueError("message.attachments 应为数组")
         return cls(
             message_id=_message_id(payload),
@@ -228,10 +265,13 @@ class Page(Generic[T]):
         item_factory: Callable[[Any], T],
     ) -> Page[T]:
         payload = _as_mapping(value, "page")
-        items = payload.get("data", [])
-        if not isinstance(items, list):
+        items = payload.get("data")
+        if items is None:
+            items = []
+        elif not isinstance(items, list):
             raise ValueError("page.data 应为数组")
-        pagination = _as_mapping(payload.get("pagination", {}), "page.pagination")
+        raw_pagination = payload.get("pagination")
+        pagination = _as_mapping({} if raw_pagination is None else raw_pagination, "page.pagination")
         has_more = pagination.get("has_more", False)
         if not isinstance(has_more, bool):
             raise ValueError("page.pagination.has_more 应为布尔值")
@@ -255,15 +295,21 @@ class Me:
     @classmethod
     def from_payload(cls, value: Any) -> Me:
         payload = _as_mapping(value, "me")
-        aliases = payload.get("aliases", [])
-        if not isinstance(aliases, list):
+        aliases = payload.get("aliases")
+        if aliases is None:
+            aliases = []
+        elif not isinstance(aliases, list):
             raise ValueError("me.aliases 应为数组")
-        scopes = payload.get("scopes", [])
-        if not isinstance(scopes, list) or any(not isinstance(item, str) for item in scopes):
+        scopes = payload.get("scopes")
+        if scopes is None:
+            scopes = []
+        elif not isinstance(scopes, list) or any(not isinstance(item, str) for item in scopes):
             raise ValueError("me.scopes 应为字符串数组")
+        rate_limits = payload.get("rate_limits")
+        constraints = payload.get("constraints")
         return cls(
             aliases=[Alias.from_payload(item) for item in aliases],
-            rate_limits=RateLimits.from_payload(payload.get("rate_limits", {})),
-            constraints=Constraints.from_payload(payload.get("constraints", {})),
+            rate_limits=RateLimits.from_payload({} if rate_limits is None else rate_limits),
+            constraints=Constraints.from_payload({} if constraints is None else constraints),
             scopes=list(scopes),
         )

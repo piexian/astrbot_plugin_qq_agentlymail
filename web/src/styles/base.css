@@ -112,6 +112,10 @@ body {
   font-size: 14px;
   overflow: hidden;
 }
+
+#app {
+  height: 100%;
+}
 button,
 input,
 select,

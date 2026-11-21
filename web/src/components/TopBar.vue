@@ -1,10 +1,27 @@
 <script setup lang="ts">
+/** 顶栏：集成账号/地址切换、目录 Tab 栏、全局搜索、折叠额度浮层、刷新与写邮件。 */
 import { onMounted, onUnmounted, useTemplateRef } from "vue";
 import { useI18n } from "../composables/useHostContext";
+import type { Alias, DisplayAccount, FolderId, QuotaView } from "../types/mail";
+import FolderNav from "./FolderNav.vue";
+import QuotaPanel from "./QuotaPanel.vue";
 import SvgIcon from "./SvgIcon.vue";
 
-defineProps<{ composeDisabled: boolean }>();
-const emit = defineEmits<{ compose: []; refresh: []; openMenu: [] }>();
+defineProps<{
+  account: DisplayAccount | null;
+  alias: Alias | null;
+  folder: FolderId;
+  searchMode: boolean;
+  inboxUnread: number;
+  quota: QuotaView;
+  composeDisabled: boolean;
+}>();
+const emit = defineEmits<{
+  openAccount: [];
+  selectFolder: [folder: FolderId];
+  compose: [];
+  refresh: [];
+}>();
 const query = defineModel<string>({ required: true });
 const searchInput = useTemplateRef<HTMLInputElement>("search");
 const { t } = useI18n();
@@ -22,37 +39,74 @@ onUnmounted(() => document.removeEventListener("keydown", onKeydown));
 
 <template>
   <header class="topbar">
-    <div class="brand-block">
+    <div class="topbar-main">
       <button
-        class="icon-button mobile-only menu-button"
-        :aria-label="t('topbar.openNav')"
-        @click="emit('openMenu')"
+        type="button"
+        class="account-trigger topbar-account"
+        aria-haspopup="dialog"
+        :aria-label="t('topbar.switchAccount')"
+        @click="emit('openAccount')"
       >
-        <SvgIcon name="menu" />
+        <span class="avatar small" :data-tone="account?.tone">{{ account?.initials ?? "?" }}</span>
+        <span class="account-copy">
+          <strong>{{ account?.name ?? t("app.title") }}</strong>
+          <span>{{ alias?.email ?? t("sidebar.noAddress") }}</span>
+        </span>
+        <SvgIcon name="chevron" />
       </button>
-      <span class="brand-mark"><SvgIcon name="mail" /></span>
-      <div>
-        <strong>{{ t("app.title") }}</strong>
+
+      <div class="topbar-tabs-inline">
+        <FolderNav
+          :folder="folder"
+          :search-mode="searchMode"
+          :inbox-unread="inboxUnread"
+          @select="emit('selectFolder', $event)"
+        />
+      </div>
+
+      <label class="global-search">
+        <SvgIcon name="search" />
+        <input
+          ref="search"
+          v-model="query"
+          type="search"
+          :placeholder="t('topbar.searchPlaceholder')"
+          autocomplete="off"
+        />
+        <kbd>Ctrl K</kbd>
+      </label>
+
+      <div class="topbar-actions">
+        <QuotaPanel :quota="quota" />
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('topbar.refresh')"
+          :title="t('topbar.refresh')"
+          @click="emit('refresh')"
+        >
+          <SvgIcon name="refresh" />
+        </button>
+        <button
+          type="button"
+          class="button primary topbar-compose"
+          :disabled="composeDisabled"
+          :aria-label="t('topbar.compose')"
+          :title="t('topbar.compose')"
+          @click="emit('compose')"
+        >
+          <SvgIcon name="compose" /><span>{{ t("topbar.compose") }}</span>
+        </button>
       </div>
     </div>
-    <label class="global-search">
-      <SvgIcon name="search" />
-      <input
-        ref="search"
-        v-model="query"
-        type="search"
-        :placeholder="t('topbar.searchPlaceholder')"
-        autocomplete="off"
+
+    <div class="topbar-tabs-bar">
+      <FolderNav
+        :folder="folder"
+        :search-mode="searchMode"
+        :inbox-unread="inboxUnread"
+        @select="emit('selectFolder', $event)"
       />
-      <kbd>Ctrl K</kbd>
-    </label>
-    <div class="topbar-actions">
-      <button class="icon-button" :aria-label="t('topbar.refresh')" @click="emit('refresh')">
-        <SvgIcon name="refresh" />
-      </button>
-      <button class="button primary" :disabled="composeDisabled" @click="emit('compose')">
-        <SvgIcon name="compose" /><span>{{ t("topbar.compose") }}</span>
-      </button>
     </div>
   </header>
 </template>

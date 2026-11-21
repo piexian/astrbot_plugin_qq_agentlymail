@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { useI18n } from "../composables/useHostContext";
 import type { Alias, DisplayAccount, FolderId, MailFilter, MessageSummary } from "../types/mail";
-import { accountStatusLabel, folderLabel } from "../utils/display";
+import { accountStatusLabel } from "../utils/display";
 import { timeLabel } from "../utils/format";
 import SvgIcon from "./SvgIcon.vue";
 
@@ -13,7 +13,6 @@ const props = defineProps<{
   messages: MessageSummary[];
   selectedId: string | null;
   summary: string;
-  composeDisabled: boolean;
   loading: boolean;
   loadingMore: boolean;
   hasMore: boolean;
@@ -27,33 +26,24 @@ const emit = defineEmits<{
   selectMessage: [messageId: string];
   openAccount: [];
   openLogin: [accountId?: string];
-  compose: [];
   loadMore: [];
   retry: [];
   retryAccounts: [];
+  clearSearch: [];
 }>();
 const filter = defineModel<MailFilter>("filter", { required: true });
 const { t, locale } = useI18n();
 
-const filters = computed(() => [
-  { id: "all" as MailFilter, label: t("list.filterAll"), disabled: false, title: "" },
-  {
-    id: "unread" as MailFilter,
-    label: t("list.filterUnread"),
-    disabled: props.searchMode,
-    title: props.searchMode ? t("list.filterUnreadDisabledTitle") : "",
-  },
-  {
-    id: "attachment" as MailFilter,
-    label: t("list.filterAttachment"),
-    disabled: true,
-    title: t("list.filterAttachmentTitle"),
-  },
-]);
-
-const title = computed(() =>
-  props.searchMode ? t("list.searchResults") : folderLabel(props.folder),
-);
+const filters = computed<{ id: MailFilter; label: string }[]>(() => {
+  // 已发送没有读状态，不提供未读筛选。
+  if (props.folder === "sent") {
+    return [{ id: "all", label: t("list.filterAll") }];
+  }
+  return [
+    { id: "all", label: t("list.filterAll") },
+    { id: "unread", label: t("list.filterUnread") },
+  ];
+});
 
 const paneState = computed(() => {
   if (props.accountsLoading) return "accounts-loading";
@@ -77,43 +67,33 @@ const emptyText = computed(() =>
 
 <template>
   <main class="message-list-pane">
-    <div class="mobile-account-row mobile-only">
-      <button @click="emit('openAccount')">
-        <span class="avatar small" :data-tone="account?.tone">{{ account?.initials }}</span>
-        <span>{{ alias?.email ?? t("sidebar.noAddress") }}</span>
-        <SvgIcon name="chevron" />
-      </button>
-    </div>
-    <div class="list-heading">
-      <div>
-        <h1>{{ title }}</h1>
-        <p>{{ summary }}</p>
+    <div class="list-header-bar">
+      <div v-if="searchMode" class="list-header-left">
+        <span class="list-search-badge">{{ t("list.searchResults") }}</span>
+        <button type="button" class="list-clear-btn" @click="emit('clearSearch')">
+          <SvgIcon name="close" />
+          <span>{{ t("list.clearSearch") }}</span>
+        </button>
       </div>
-      <button
-        class="button secondary mobile-only"
-        :disabled="composeDisabled"
-        @click="emit('compose')"
-      >
-        {{ t("topbar.compose") }}
-      </button>
+      <div v-else class="list-filters" role="group" :aria-label="t('list.filterGroup')">
+        <button
+          v-for="item in filters"
+          :key="item.id"
+          type="button"
+          class="filter"
+          :class="{ active: filter === item.id }"
+          @click="filter = item.id"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+
+      <div class="list-header-right">
+        <span v-if="paneState === 'list'" class="list-count" :title="summary"
+          >{{ messages.length }}{{ hasMore ? "+" : "" }}</span
+        >
+      </div>
     </div>
-    <div class="list-filters" role="group" :aria-label="t('list.filterGroup')">
-      <button
-        v-for="item in filters"
-        :key="item.id"
-        class="filter"
-        :class="{ active: filter === item.id }"
-        :disabled="item.disabled"
-        :title="item.title"
-        @click="filter = item.id"
-      >
-        {{ item.label }}
-      </button>
-    </div>
-    <p v-if="searchMode" class="field-hint filter-hint">
-      {{ t("list.searchHint") }}
-    </p>
-    <p v-else class="field-hint filter-hint">{{ t("list.attachmentHint") }}</p>
 
     <div class="message-list" :aria-label="t('list.ariaLabel')">
       <div v-if="paneState === 'accounts-loading'" class="empty-list">
@@ -122,7 +102,7 @@ const emptyText = computed(() =>
       <div v-else-if="paneState === 'accounts-error'" class="empty-list">
         <SvgIcon name="mail" /><strong>{{ t("list.accountsErrorTitle") }}</strong>
         <p>{{ accountsError }}</p>
-        <button class="button secondary" @click="emit('retryAccounts')">
+        <button type="button" class="button secondary" @click="emit('retryAccounts')">
           {{ t("list.retry") }}
         </button>
       </div>
@@ -130,10 +110,10 @@ const emptyText = computed(() =>
         <SvgIcon name="mail" /><strong>{{ t("list.noAccountsTitle") }}</strong>
         <p>{{ t("list.noAccountsHint") }}</p>
         <div class="empty-actions">
-          <button class="button primary" @click="emit('openLogin', 'default')">
+          <button type="button" class="button primary" @click="emit('openLogin', 'default')">
             {{ t("login.title") }}
           </button>
-          <button class="button secondary" @click="emit('openAccount')">
+          <button type="button" class="button secondary" @click="emit('openAccount')">
             {{ t("list.viewAccounts") }}
           </button>
         </div>
@@ -144,10 +124,10 @@ const emptyText = computed(() =>
         }}</strong>
         <p>{{ account?.error ?? t("list.accountUnavailable") }}</p>
         <div class="empty-actions">
-          <button class="button primary" @click="emit('openLogin', account?.account)">
+          <button type="button" class="button primary" @click="emit('openLogin', account?.account)">
             {{ t("accountDialog.relogin") }}
           </button>
-          <button class="button secondary" @click="emit('openAccount')">
+          <button type="button" class="button secondary" @click="emit('openAccount')">
             {{ t("list.switchAccount") }}
           </button>
         </div>
@@ -155,7 +135,7 @@ const emptyText = computed(() =>
       <div v-else-if="paneState === 'no-alias'" class="empty-list">
         <SvgIcon name="mail" /><strong>{{ t("sidebar.noAddress") }}</strong>
         <p>{{ t("list.noAliasHint") }}</p>
-        <button class="button secondary" @click="emit('openAccount')">
+        <button type="button" class="button secondary" @click="emit('openAccount')">
           {{ t("list.manageAddresses") }}
         </button>
       </div>
@@ -165,7 +145,9 @@ const emptyText = computed(() =>
       <div v-else-if="paneState === 'list-error'" class="empty-list">
         <SvgIcon name="mail" /><strong>{{ t("list.listErrorTitle") }}</strong>
         <p>{{ error }}</p>
-        <button class="button secondary" @click="emit('retry')">{{ t("list.retry") }}</button>
+        <button type="button" class="button secondary" @click="emit('retry')">
+          {{ t("list.retry") }}
+        </button>
       </div>
       <div v-else-if="paneState === 'empty'" class="empty-list">
         <SvgIcon name="mail" /><strong>{{ emptyTitle }}</strong>
@@ -174,17 +156,27 @@ const emptyText = computed(() =>
       <template v-else>
         <p v-if="error" class="list-error-banner" role="alert">
           {{ error }}
-          <button class="button secondary" @click="emit('retry')">{{ t("list.retry") }}</button>
+          <button type="button" class="button secondary" @click="emit('retry')">
+            {{ t("list.retry") }}
+          </button>
         </p>
         <button
           v-for="message in messages"
           :key="message.message_id"
+          type="button"
           class="message-row"
-          :class="{ unread: !message.is_read, selected: message.message_id === selectedId }"
+          :class="{
+            unread: folder !== 'sent' && !message.is_read,
+            selected: message.message_id === selectedId,
+          }"
           @click="emit('selectMessage', message.message_id)"
         >
           <span class="message-top">
-            <span class="unread-dot" :class="{ placeholder: message.is_read }"></span>
+            <span
+              v-if="folder !== 'sent'"
+              class="unread-dot"
+              :class="{ placeholder: message.is_read }"
+            ></span>
             <span class="message-sender">{{ message.from_?.name ?? message.from_?.email }}</span>
             <span class="message-time">{{
               message.created_at ? timeLabel(message.created_at, locale) : ""
@@ -199,6 +191,7 @@ const emptyText = computed(() =>
       <span>{{ summary }}</span>
       <button
         v-if="paneState === 'list' && hasMore"
+        type="button"
         class="button secondary load-more"
         :disabled="loadingMore"
         @click="emit('loadMore')"

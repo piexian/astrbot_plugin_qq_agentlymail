@@ -10,12 +10,11 @@ import { useMessageList } from "./composables/useMessageList";
 import { useReader } from "./composables/useReader";
 import { useToasts } from "./composables/useToasts";
 import type { MessageKey } from "./i18n/messages";
-import type { Alias, Attachment, Me } from "./types/mail";
+import type { Alias, Attachment, FolderId, Me } from "./types/mail";
 import { errorMessage } from "./utils/error";
 import IconSprite from "./components/IconSprite.vue";
 import SvgIcon from "./components/SvgIcon.vue";
 import TopBar from "./components/TopBar.vue";
-import SideBar from "./components/SideBar.vue";
 import MessageListPane from "./components/MessageListPane.vue";
 import ReaderPane from "./components/ReaderPane.vue";
 import AccountDialog from "./components/AccountDialog.vue";
@@ -24,6 +23,7 @@ import MailboxDialog from "./components/MailboxDialog.vue";
 import DeleteAliasDialog from "./components/DeleteAliasDialog.vue";
 import ComposeDialog from "./components/ComposeDialog.vue";
 import SendConfirmDialog from "./components/SendConfirmDialog.vue";
+import TrashConfirmDialog from "./components/TrashConfirmDialog.vue";
 import ToastRegion from "./components/ToastRegion.vue";
 
 const { t } = useI18n();
@@ -58,6 +58,7 @@ const {
 
 const selectedMessageId = shallowRef<string | null>(null);
 const mobileReading = shallowRef(false);
+const listCollapsed = shallowRef(false);
 
 const list = useMessageList({
   api: mailApi,
@@ -75,6 +76,7 @@ const {
   loadingMore,
   error: listError,
   setFolder,
+  clearQuery,
   loadMore,
   reload: reloadList,
   resetView,
@@ -134,19 +136,16 @@ const {
   accountInput: loginAccount,
   session: loginSession,
   starting: loginStarting,
-  selecting: loginSelecting,
   cancelling: loginCancelling,
   localError: loginError,
   isInFlight: loginInFlight,
   openLogin,
   startLogin,
-  refreshQr,
-  selectMail: selectLoginMail,
+  refreshLink,
   cancelLogin,
   closeLogin,
 } = login;
 
-const sidebarOpen = shallowRef(false);
 const accountDialogOpen = shallowRef(false);
 const mailboxDialogOpen = shallowRef(false);
 const manageAccountId = shallowRef<string | null>(null);
@@ -157,6 +156,8 @@ const createLoading = shallowRef(false);
 const modifyLoading = shallowRef(false);
 const deleteLoading = shallowRef(false);
 const trashLoading = shallowRef(false);
+const trashConfirmOpen = shallowRef(false);
+const trashError = shallowRef<string | null>(null);
 const downloading = shallowRef(false);
 let managedMeToken = 0;
 
@@ -214,8 +215,13 @@ async function retryAccounts() {
 }
 
 function openAccountDialog() {
-  sidebarOpen.value = false;
   accountDialogOpen.value = true;
+}
+
+function onSelectFolder(next: FolderId) {
+  setFolder(next);
+  listCollapsed.value = false;
+  mobileReading.value = false;
 }
 
 function onSelectAddress(nextAccountId: string, nextAliasId: string) {
@@ -223,6 +229,7 @@ function onSelectAddress(nextAccountId: string, nextAliasId: string) {
   resetView();
   selectedMessageId.value = null;
   mobileReading.value = false;
+  listCollapsed.value = false;
   accountDialogOpen.value = false;
   notify(t("app.switchedTo", { target: currentAlias.value?.email ?? nextAliasId }));
 }
@@ -231,7 +238,15 @@ function onSelectAddress(nextAccountId: string, nextAliasId: string) {
 watch([accountId, () => currentAlias.value?.alias_id ?? null], () => {
   selectedMessageId.value = null;
   mobileReading.value = false;
-  sidebarOpen.value = false;
+  listCollapsed.value = false;
+});
+
+// 进入搜索态时自动展开列表，避免折叠状态下看不到搜索结果。
+watch(searchMode, (active) => {
+  if (active) {
+    listCollapsed.value = false;
+    mobileReading.value = false;
+  }
 });
 
 async function loadManagedMe(account: string) {
@@ -264,6 +279,7 @@ async function handleLoggedIn(loggedAccount: string) {
     resetView();
     selectedMessageId.value = null;
     mobileReading.value = false;
+    listCollapsed.value = false;
   } else {
     selectDefaultAccount();
   }
@@ -358,7 +374,6 @@ async function onDownload(attachment: Attachment, index: number) {
 }
 
 function onOpenCompose(mode: ComposeMode) {
-  sidebarOpen.value = false;
   openCompose(mode);
 }
 
@@ -371,24 +386,39 @@ function exitReading() {
   mobileReading.value = false;
 }
 
-async function trashSelected() {
+function onRequestTrash() {
   const message = fullMessage.value;
-  const account = currentAccount.value?.account;
-  const alias = currentAlias.value?.alias_id;
-  if (!message || !account || !alias || trashLoading.value) return;
+  if (!message) return;
   if (folder.value === "trash") {
     notify(t("app.alreadyInTrash"));
     return;
   }
+  trashError.value = null;
+  trashConfirmOpen.value = true;
+}
+
+function closeTrashConfirm() {
+  if (trashLoading.value) return;
+  trashConfirmOpen.value = false;
+  trashError.value = null;
+}
+
+async function confirmTrash() {
+  const message = fullMessage.value;
+  const account = currentAccount.value?.account;
+  const alias = currentAlias.value?.alias_id;
+  if (!message || !account || !alias || trashLoading.value) return;
   trashLoading.value = true;
   try {
     await mailApi.trash({ account, alias_id: alias, message_id: message.message_id });
+    trashConfirmOpen.value = false;
+    trashError.value = null;
     selectedMessageId.value = null;
     mobileReading.value = false;
     reloadList();
     notify(t("app.movedToTrash"));
   } catch (error) {
-    notify(errorMessage(error));
+    trashError.value = errorMessage(error);
   } finally {
     trashLoading.value = false;
   }
@@ -400,6 +430,7 @@ function handleSent() {
   reloadList();
   selectedMessageId.value = null;
   mobileReading.value = false;
+  listCollapsed.value = false;
   const id = accountId.value;
   if (id) void loadMe(id);
 }
@@ -412,6 +443,7 @@ function handleCheckSent() {
   reloadList();
   selectedMessageId.value = null;
   mobileReading.value = false;
+  listCollapsed.value = false;
 }
 
 function refresh() {
@@ -423,25 +455,18 @@ function reloadPage() {
 }
 
 function onResize() {
-  if (window.innerWidth > 1100) sidebarOpen.value = false;
   if (window.innerWidth > 760) exitReading();
-}
-
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") sidebarOpen.value = false;
 }
 
 onMounted(() => {
   stopHostSync = syncHostContext(bridge);
   void initialize();
   window.addEventListener("resize", onResize);
-  document.addEventListener("keydown", onKeydown);
 });
 onUnmounted(() => {
   stopHostSync?.();
   stopHostSync = null;
   window.removeEventListener("resize", onResize);
-  document.removeEventListener("keydown", onKeydown);
 });
 </script>
 
@@ -452,7 +477,9 @@ onUnmounted(() => {
       <SvgIcon name="mail" />
       <strong>{{ t("app.initFailedTitle") }}</strong>
       <p>{{ initError }}</p>
-      <button class="button primary" @click="reloadPage">{{ t("app.reloadPage") }}</button>
+      <button type="button" class="button primary" @click="reloadPage">
+        {{ t("app.reloadPage") }}
+      </button>
     </div>
   </div>
   <div v-else-if="initializing" class="init-screen">
@@ -465,32 +492,22 @@ onUnmounted(() => {
     <div class="app-shell">
       <TopBar
         v-model="query"
+        :account="currentAccount"
+        :alias="currentAlias"
+        :folder="folder"
+        :search-mode="searchMode"
+        :inbox-unread="0"
+        :quota="quotaView"
         :compose-disabled="composeDisabled"
+        @open-account="openAccountDialog"
+        @select-folder="onSelectFolder"
         @compose="onOpenCompose('new')"
         @refresh="refresh"
-        @open-menu="sidebarOpen = true"
       />
-      <div class="mail-layout" :class="{ 'mobile-reading': mobileReading }">
-        <SideBar
-          :account="currentAccount"
-          :alias="currentAlias"
-          :folder="folder"
-          :inbox-unread="0"
-          :quota="quotaView"
-          :open="sidebarOpen"
-          :compose-disabled="composeDisabled"
-          @open-account="openAccountDialog"
-          @compose="onOpenCompose('new')"
-          @select-folder="
-            setFolder($event);
-            sidebarOpen = false;
-          "
-        />
-        <button
-          class="sidebar-scrim"
-          :aria-label="t('app.closeNav')"
-          @click="sidebarOpen = false"
-        ></button>
+      <div
+        class="mail-layout"
+        :class="{ 'mobile-reading': mobileReading, 'list-collapsed': listCollapsed }"
+      >
         <MessageListPane
           v-model:filter="filter"
           :account="currentAccount"
@@ -499,7 +516,6 @@ onUnmounted(() => {
           :messages="messages"
           :selected-id="selectedMessageId"
           :summary="listSummary"
-          :compose-disabled="composeDisabled"
           :loading="listLoading"
           :loading-more="loadingMore"
           :has-more="hasMore"
@@ -511,10 +527,10 @@ onUnmounted(() => {
           @select-message="onSelectMessage"
           @open-account="openAccountDialog"
           @open-login="onRelogin"
-          @compose="onOpenCompose('new')"
           @load-more="loadMore"
           @retry="reloadList"
           @retry-accounts="retryAccounts"
+          @clear-search="clearQuery"
         />
         <ReaderPane
           :message="fullMessage"
@@ -523,10 +539,12 @@ onUnmounted(() => {
           :error="readerError"
           :trash-loading="trashLoading"
           :downloading="downloading"
+          :list-collapsed="listCollapsed"
           @back="exitReading"
+          @toggle-list="listCollapsed = !listCollapsed"
           @reply="onOpenCompose('reply')"
           @forward="onOpenCompose('forward')"
-          @trash="trashSelected"
+          @trash="onRequestTrash"
           @download="onDownload"
           @retry="retryReader"
         />
@@ -549,15 +567,13 @@ onUnmounted(() => {
       :open="loginOpen"
       :session="loginSession"
       :starting="loginStarting"
-      :selecting="loginSelecting"
       :cancelling="loginCancelling"
       :local-error="loginError"
       :is-in-flight="loginInFlight"
       @close="closeLogin"
       @start="startLogin"
-      @refresh="refreshQr"
-      @select-mail="selectLoginMail"
-      @abort="cancelLogin(true)"
+      @refresh="refreshLink"
+      @abort="cancelLogin()"
       @copied="notify"
     />
     <MailboxDialog
@@ -598,6 +614,14 @@ onUnmounted(() => {
       @remove-attachment="removeAttachment"
       @save-draft="saveDraft"
       @submit="submit"
+    />
+    <TrashConfirmDialog
+      :open="trashConfirmOpen"
+      :subject="fullMessage?.subject ?? ''"
+      :loading="trashLoading"
+      :error="trashError"
+      @close="closeTrashConfirm"
+      @confirm="confirmTrash"
     />
     <SendConfirmDialog
       :open="confirmOpen"

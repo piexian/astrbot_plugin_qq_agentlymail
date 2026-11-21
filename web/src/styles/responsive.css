@@ -1,95 +1,106 @@
-@media (max-width: 1260px) {
-  .topbar {
-    grid-template-columns: minmax(205px, 1fr) minmax(260px, 480px) minmax(180px, 1fr);
-    gap: 16px;
+@media (max-width: 1160px) {
+  .topbar-tabs-inline {
+    display: none;
+  }
+  .topbar-tabs-bar {
+    display: flex;
+  }
+  .topbar-account {
+    flex: 0 1 240px;
+  }
+  .global-search {
+    max-width: 380px;
   }
   .mail-layout {
-    grid-template-columns: 214px 330px minmax(0, 1fr);
+    grid-template-columns: 310px minmax(0, 1fr);
+  }
+  .mail-layout.list-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
   }
   .mail-article {
-    padding-inline: 28px;
+    padding: 22px 26px 40px;
+  }
+  .toast-region {
+    top: 108px;
   }
 }
 
-@media (max-width: 1100px) {
-  .menu-button {
-    display: inline-flex !important;
+@media (max-width: 900px) {
+  .global-search kbd {
+    display: none;
+  }
+  .quota-trigger-label {
+    display: none;
+  }
+  .quota-trigger {
+    padding: 0 8px;
   }
   .mail-layout {
-    grid-template-columns: 340px minmax(0, 1fr);
+    grid-template-columns: 280px minmax(0, 1fr);
   }
-  .sidebar {
-    position: fixed;
-    left: 0;
-    top: 64px;
-    bottom: 0;
-    z-index: 30;
-    width: 250px;
-    transform: translateX(-102%);
-    transition: transform 180ms ease-out;
-    box-shadow: var(--sidebar-shadow);
-  }
-  .sidebar.open {
-    transform: translateX(0);
-  }
-  .sidebar-scrim {
-    position: fixed;
-    inset: 64px 0 0;
-    z-index: 25;
-    width: 100%;
-    height: auto;
-    border: 0;
-    background: var(--scrim);
-  }
-  .sidebar.open + .sidebar-scrim {
-    display: block;
-  }
-  .topbar {
-    grid-template-columns: minmax(220px, 1fr) minmax(260px, 440px) auto;
-  }
-  .brand-block {
-    gap: 6px;
+  .mail-layout.list-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
   }
 }
 
 @media (max-width: 760px) {
-  .topbar {
-    height: 108px;
-    padding: 9px 12px 10px;
+  .topbar-main {
+    min-height: 0;
+    padding: 8px 12px;
+    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: 42px 38px;
-    gap: 7px 8px;
+    grid-template-rows: auto auto;
+    gap: 8px;
   }
-  .brand-block strong {
-    font-size: 16px;
-  }
-  .brand-mark {
-    width: 32px;
-    height: 32px;
-  }
-  .global-search {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    height: 38px;
-  }
-  .global-search kbd {
-    display: none;
+  .topbar-account {
+    grid-column: 1;
+    grid-row: 1;
+    flex: none;
+    min-width: 0;
+    max-width: none;
+    padding: 4px 6px;
   }
   .topbar-actions {
     grid-column: 2;
     grid-row: 1;
+    gap: 4px;
   }
-  .topbar-actions .primary {
-    display: none;
+  .global-search {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+    max-width: none;
+    margin-left: 0;
+    height: 38px;
   }
-  .mail-layout {
+  .topbar-tabs-bar {
+    min-height: 42px;
+    padding: 0 8px;
+  }
+  .topbar-tabs-bar .folder-tabs {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .topbar-tabs-bar .folder-tab {
+    flex: 1 0 auto;
+    justify-content: center;
+    padding: 0 8px;
+  }
+  .quota-popover {
+    position: fixed;
+    top: 56px;
+    right: 12px;
+    left: auto;
+    width: min(300px, calc(100vw - 24px));
+  }
+  .mail-layout,
+  .mail-layout.list-collapsed {
     grid-template-columns: minmax(0, 1fr);
   }
-  .sidebar {
-    top: 108px;
-  }
-  .sidebar-scrim {
-    inset: 108px 0 0;
+  .mail-layout.list-collapsed .message-list-pane {
+    overflow: visible;
+    visibility: visible;
+    pointer-events: auto;
   }
   .message-list-pane,
   .reader-pane {
@@ -109,95 +120,55 @@
   .mobile-only {
     display: inline-flex !important;
   }
-  .mobile-account-row.mobile-only {
-    display: block !important;
+  .desktop-only {
+    display: none !important;
   }
-  .mobile-account-row {
-    min-height: 50px;
-    padding: 7px 12px;
-    border-bottom: 1px solid var(--line);
-  }
-  .mobile-account-row > button {
-    width: 100%;
-    min-height: 36px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    text-align: left;
-  }
-  .mobile-account-row > button > span:nth-child(2) {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 13px;
-  }
-  .mobile-account-row svg {
-    width: 15px;
-    color: var(--muted);
-  }
-  .list-heading {
-    min-height: 74px;
-    padding: 14px 16px 10px;
-  }
-  .list-heading h1 {
-    font-size: 20px;
-  }
-  .list-filters {
-    padding: 0 12px 10px;
+  .list-header-bar {
+    padding: 0 12px;
   }
   .filter {
-    min-height: 36px;
-    flex: 1;
+    min-height: 34px;
   }
   .message-row {
-    min-height: 102px;
-    padding: 14px 16px;
+    min-height: 68px;
+    padding: 12px 14px;
   }
   .list-footer {
     min-height: 40px;
   }
   .reader-toolbar {
-    min-height: 56px;
+    min-height: 52px;
     padding: 0 10px;
-    justify-content: flex-start;
-  }
-  .reader-actions {
-    flex: 1;
-    justify-content: flex-end;
-    gap: 6px;
   }
   .reader-actions .button {
+    min-height: 36px;
     padding: 0 10px;
   }
-  .mail-article {
-    padding: 22px 18px 36px;
+  .mail-article,
+  .mail-article.wide {
+    width: 100%;
+    padding: 18px 16px 32px;
   }
   .mail-subject {
-    font-size: 22px;
+    font-size: 20px;
   }
   .sender-block {
-    margin-top: 20px;
-    align-items: flex-start;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    gap: 10px;
   }
-  .sender-date {
-    display: none;
+  .sender-meta {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+  .attachment-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
   .mail-body {
-    margin-top: 22px;
-    padding-top: 20px;
+    margin-top: 18px;
+    padding-top: 18px;
     font-size: 15px;
-  }
-  .button {
-    min-height: 44px;
-  }
-  .icon-button {
-    width: 44px;
-    height: 44px;
   }
   .dialog:not(.compose-dialog) {
     width: calc(100vw - 24px);
@@ -271,21 +242,37 @@
     flex: 1;
   }
   .toast-region {
-    top: 118px;
+    top: 148px;
     right: 12px;
     width: calc(100vw - 24px);
   }
 }
 
-@media (max-width: 390px) {
-  .brand-block > div {
+@media (max-width: 520px) {
+  .topbar-compose span {
     display: none;
   }
-  .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
+  .topbar-compose {
+    width: 38px;
+    min-width: 38px;
+    padding: 0;
+  }
+  .quota-chevron {
+    display: none;
+  }
+  .topbar-tabs-bar .folder-tab svg {
+    display: none;
+  }
+}
+
+@media (max-width: 390px) {
+  .topbar-tabs-bar .folder-tab {
+    padding: 0 6px;
+    font-size: 12.5px;
   }
   .reader-actions .button {
     font-size: 13px;
+    padding: 0 8px;
   }
   .dialog-footer .button {
     flex: 1;

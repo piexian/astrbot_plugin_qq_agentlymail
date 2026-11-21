@@ -10,7 +10,6 @@ const props = defineProps<{
   open: boolean;
   session: WebLoginSession | null;
   starting: boolean;
-  selecting: boolean;
   cancelling: boolean;
   localError: string | null;
   isInFlight: boolean;
@@ -20,15 +19,13 @@ const emit = defineEmits<{
   close: [];
   start: [];
   refresh: [];
-  selectMail: [email: string];
   abort: [];
   copied: [message: string];
 }>();
-
 const account = defineModel<string>("account", { required: true });
 const { t } = useI18n();
 
-const copiedKind = shallowRef<"url" | "code" | null>(null);
+const copiedUrl = shallowRef(false);
 let copiedTimer: number | undefined;
 
 watch(
@@ -39,7 +36,7 @@ watch(
         window.clearTimeout(copiedTimer);
         copiedTimer = undefined;
       }
-      copiedKind.value = null;
+      copiedUrl.value = false;
     }
   },
 );
@@ -55,14 +52,8 @@ const statusBanner = computed(() => {
   const s = props.session;
   if (!s) return null;
   if (s.state === "success") return { tone: "success", text: t("login.statusSuccess") };
-  if (s.state === "scanned") return { tone: "info", text: t("login.statusScanned") };
-  if (s.state === "select_mail") return { tone: "info", text: t("login.statusSelectMail") };
-  if (s.state === "authorizing") return { tone: "info", text: t("login.statusAuthorizing") };
   if (s.state === "expired") return { tone: "danger", text: t("login.statusExpired") };
   if (s.state === "error") return { tone: "danger", text: t("login.statusError") };
-  if (s.qr_expired) return { tone: "warn", text: t("login.statusQrExpired") };
-  if (s.mode === "browser" || !s.qr_image)
-    return { tone: "info", text: t("login.statusBrowserOnly") };
   return { tone: "info", text: t("login.statusWaiting") };
 });
 
@@ -75,30 +66,19 @@ const displayError = computed(() => {
       return t("login.errExpired");
     case "access_denied":
       return t("login.errAccessDenied");
-    case "wx_cancelled":
-      return t("login.errWxCancelled");
-    case "wx_601":
-      return t("login.errWx601");
-    case "wx_75111":
-      return t("login.errWx75111");
-    case "wx_5012":
-      return t("login.errWx5012");
-    case "transport_error":
-      return t("login.errTransport");
     default:
       return s.error || t("login.statusError");
   }
 });
-
-async function copyField(kind: "url" | "code", value: string) {
+async function copyUrl(value: string) {
   const ok = await copyText(value);
   if (ok) {
-    copiedKind.value = kind;
+    copiedUrl.value = true;
     if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
     copiedTimer = window.setTimeout(() => {
-      copiedKind.value = null;
+      copiedUrl.value = false;
     }, 2000);
-    emit("copied", kind === "url" ? t("login.copiedUrlToast") : t("login.copiedCodeToast"));
+    emit("copied", t("login.copiedUrlToast"));
   } else {
     emit("copied", t("login.copyFailedToast"));
   }
@@ -151,41 +131,7 @@ async function copyField(kind: "url" | "code", value: string) {
           </p>
         </div>
 
-        <div v-else-if="session.state === 'select_mail'" class="login-mail-picker">
-          <button
-            v-for="item in session.mails ?? []"
-            :key="item.email"
-            type="button"
-            class="account-address"
-            :disabled="selecting"
-            @click="emit('selectMail', item.email)"
-          >
-            <span class="address-text">{{ item.email }}</span>
-            <span v-if="item.is_selected" class="primary-tag">{{ t("login.defaultMailTag") }}</span>
-          </button>
-        </div>
-
         <template v-else>
-          <div v-if="session.qr_image" class="login-qr-stage">
-            <div class="login-qr-frame" :class="{ dimmed: session.state === 'scanned' }">
-              <img :src="session.qr_image" :alt="t('login.qrAlt')" class="login-qr-image" />
-            </div>
-            <p class="field-hint login-qr-hint">{{ t("login.qrHint") }}</p>
-          </div>
-          <div v-else-if="session.qr_expired" class="login-qr-expired">
-            <p>{{ t("login.statusQrExpired") }}</p>
-            <button
-              type="button"
-              class="button secondary"
-              :disabled="starting"
-              @click="emit('refresh')"
-            >
-              <SvgIcon name="refresh" />{{
-                starting ? t("login.refreshing") : t("login.refreshQr")
-              }}
-            </button>
-          </div>
-
           <p v-if="displayError" class="login-error-box" role="alert">{{ displayError }}</p>
 
           <div v-if="session.browser_url" class="login-fallback-box">
@@ -202,25 +148,10 @@ async function copyField(kind: "url" | "code", value: string) {
                 <button
                   type="button"
                   class="button secondary login-copy-btn"
-                  @click="copyField('url', session.browser_url)"
+                  @click="copyUrl(session.browser_url)"
                 >
-                  <SvgIcon :name="copiedKind === 'url' ? 'check' : 'copy'" />
-                  <span>{{ copiedKind === "url" ? t("login.copied") : t("login.copyUrl") }}</span>
-                </button>
-              </div>
-            </div>
-
-            <div v-if="session.input_code" class="login-copy-block">
-              <span class="login-copy-label">{{ t("login.codeLabel") }}</span>
-              <div class="login-copy-row">
-                <code class="login-code-value">{{ session.input_code }}</code>
-                <button
-                  type="button"
-                  class="button secondary login-copy-btn"
-                  @click="copyField('code', session.input_code)"
-                >
-                  <SvgIcon :name="copiedKind === 'code' ? 'check' : 'copy'" />
-                  <span>{{ copiedKind === "code" ? t("login.copied") : t("login.copyCode") }}</span>
+                  <SvgIcon :name="copiedUrl ? 'check' : 'copy'" />
+                  <span>{{ copiedUrl ? t("login.copied") : t("login.copyUrl") }}</span>
                 </button>
               </div>
             </div>
@@ -261,7 +192,7 @@ async function copyField(kind: "url" | "code", value: string) {
           :disabled="starting || cancelling"
           @click="emit('refresh')"
         >
-          <SvgIcon name="refresh" />{{ starting ? t("login.refreshing") : t("login.refreshQr") }}
+          <SvgIcon name="refresh" />{{ starting ? t("login.refreshing") : t("login.refreshLink") }}
         </button>
       </template>
 

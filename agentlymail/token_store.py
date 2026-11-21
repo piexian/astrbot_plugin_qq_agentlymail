@@ -13,8 +13,10 @@ from typing import AsyncIterator, Any
 
 from astrbot.api import logger
 
-
-DEFAULT_STORAGE_ROOT = Path("data/plugin_data/astrbot_plugin_qq_agentlymail")
+try:
+    from astrbot.api.util import get_astrbot_data_path
+except ImportError:  # 兼容旧版 AstrBot：公共 API 未导出时回退到内部路径助手。
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 
 class TokenStoreError(RuntimeError):
@@ -59,7 +61,10 @@ class TokenBundle:
 class TokenStore:
     """按账号安全读写 OAuth 凭证文件。"""
 
-    def __init__(self, root_dir: str | os.PathLike[str] = DEFAULT_STORAGE_ROOT):
+    def __init__(self, root_dir: str | os.PathLike[str] | None = None):
+        self.name = Path(__file__).resolve().parent.parent.name
+        if root_dir is None:
+            root_dir = Path(get_astrbot_data_path()) / "plugin_data" / self.name
         self.root_dir = Path(root_dir)
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -218,14 +223,12 @@ class TokenStore:
         temporary_path = Path(temporary_name)
         logger.debug(f"[agently] 凭证存储 临时文件已创建 路径={temporary_path}")
         try:
-            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary_path, path)
-            os.chmod(path, 0o600)
         except OSError as exc:
             logger.warning(
                 f"[agently] 凭证存储 原子写入失败 路径={path} 异常={type(exc).__name__}"

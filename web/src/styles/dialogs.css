@@ -452,8 +452,8 @@
 }
 .toast-region {
   position: fixed;
-  right: 22px;
-  top: 78px;
+  right: 20px;
+  top: 68px;
   z-index: 100;
   width: min(360px, calc(100vw - 32px));
   display: flex;
@@ -607,47 +607,6 @@
   background: var(--danger-soft);
   color: var(--danger-ink);
 }
-.login-qr-stage {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-.login-qr-frame {
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: #ffffff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.login-qr-frame.dimmed {
-  opacity: 0.45;
-}
-.login-qr-image {
-  width: 212px;
-  height: 212px;
-  display: block;
-  object-fit: contain;
-}
-.login-qr-hint {
-  margin-top: 0;
-  text-align: center;
-}
-.login-qr-expired {
-  padding: 18px 16px;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface-subtle);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  text-align: center;
-  color: var(--ink-soft);
-  font-size: 13px;
-}
 .login-fallback-box {
   padding: 14px;
   border: 1px solid var(--line);
@@ -683,23 +642,6 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
-.login-code-value {
-  flex: 1;
-  min-width: 0;
-  height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--ink);
-  display: inline-flex;
-  align-items: center;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  user-select: all;
-}
 .login-copy-btn {
   min-height: 36px;
   padding: 0 11px;
@@ -709,14 +651,6 @@
 .login-copy-btn svg {
   width: 15px;
   height: 15px;
-}
-.login-mail-picker {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 .login-success-card {
   padding: 20px 16px;

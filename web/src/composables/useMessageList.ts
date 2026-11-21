@@ -77,7 +77,7 @@ export function useMessageList(deps: MessageListDeps) {
       dir: folder.value,
       limit: PAGE_LIMIT,
       cursor: cursor ?? undefined,
-      unread: filter.value === "unread" ? true : undefined,
+      unread: folder.value !== "sent" && filter.value === "unread" ? true : undefined,
     });
   }
 
@@ -105,7 +105,7 @@ export function useMessageList(deps: MessageListDeps) {
     try {
       const page = await requestPage(null, account, alias);
       if (token !== activeToken) return;
-      items.value = dedupe([], page.data);
+      items.value = dedupe([], page.items);
       hasMore.value = page.has_more;
       nextCursor.value = page.next_cursor ?? null;
     } catch (cause) {
@@ -142,7 +142,7 @@ export function useMessageList(deps: MessageListDeps) {
     try {
       const page = await requestPage(cursor, account, alias);
       if (token !== activeToken || key !== filterKey.value) return;
-      items.value = dedupe(items.value, page.data);
+      items.value = dedupe(items.value, page.items);
       hasMore.value = page.has_more;
       nextCursor.value = page.next_cursor ?? null;
     } catch (cause) {
@@ -171,6 +171,7 @@ export function useMessageList(deps: MessageListDeps) {
 
   function setFolder(next: FolderId) {
     clearQuery();
+    if (next === "sent" && filter.value === "unread") filter.value = "all";
     folder.value = next;
   }
 
@@ -197,6 +198,7 @@ export function useMessageList(deps: MessageListDeps) {
     setFolder,
     setFilter,
     setQuery,
+    clearQuery,
     loadMore,
     reload,
     resetView,

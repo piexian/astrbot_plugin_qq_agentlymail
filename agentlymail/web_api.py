@@ -21,12 +21,6 @@ from astrbot.api.web import error_response, file_response, json_response, reques
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .client import AgentlyMailClient, ClientError
-from .headless import (
-    Func3Result,
-    HeadlessQRLogin,
-    HeadlessQRLoginError,
-    HeadlessQRSession,
-)
 from .models import Alias, Me, Message, MessageSummary, Page
 from .oauth import (
     AccessDeniedError,
@@ -64,17 +58,6 @@ MAX_ACCOUNT_NAME_LEN = 64
 T = TypeVar("T")
 
 
-def _qr_data_url(image: bytes) -> str:
-    """按文件头魔数把二维码字节编码为 Data URL，仅用于页面展示。"""
-    if image.startswith(b"\x89PNG\r\n\x1a\n"):
-        mime = "image/png"
-    elif image.startswith(b"RIFF") and image[8:12] == b"WEBP":
-        mime = "image/webp"
-    elif image.startswith(b"GIF8"):
-        mime = "image/gif"
-    else:
-        mime = "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"
 
 
 @dataclass(slots=True)
@@ -83,22 +66,13 @@ class _WebLoginSession:
 
     session_id: str
     account: str
-    mode: str
     flow: DeviceFlowStart
     deadline: float
     expires_at: float
-    qr_image: str | None = None
-    qr_expired: bool = False
     state: str = "waiting_scan"
-    mails: list[dict[str, Any]] | None = None
     email: str | None = None
     error: str | None = None
     error_code: str | None = None
-    headless: HeadlessQRLogin | None = field(default=None, repr=False)
-    qr_session: HeadlessQRSession | None = field(default=None, repr=False)
-    user_code: str | None = field(default=None, repr=False)
-    func3_result: Func3Result | None = field(default=None, repr=False)
-    mail_choice: asyncio.Future[str] | None = field(default=None, repr=False)
     task: asyncio.Task[Any] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,14 +80,10 @@ class _WebLoginSession:
         return {
             "session_id": self.session_id,
             "account": self.account,
-            "mode": self.mode,
             "state": self.state,
-            "qr_image": self.qr_image,
-            "qr_expired": self.qr_expired,
             "browser_url": self.flow.browser_url,
             "input_code": self.flow.input_code,
             "expires_at": _iso(self.expires_at),
-            "mails": self.mails,
             "email": self.email,
             "error": self.error,
             "error_code": self.error_code,
@@ -322,7 +292,7 @@ def _message_dict(message: Message) -> dict[str, Any]:
 
 def _page_dict(page: Page) -> dict[str, Any]:
     return {
-        "data": [_summary_dict(item) for item in page.data],
+        "items": [_summary_dict(item) for item in page.data],
         "has_more": page.has_more,
         "next_cursor": page.next_cursor,
     }
@@ -458,18 +428,6 @@ class MailWebApi:
         self._login_sessions: dict[str, _WebLoginSession] = {}
         self._active_login_id: str | None = None
 
-    @staticmethod
-    def _make_headless() -> HeadlessQRLogin:
-        """创建无头扫码登录客户端。"""
-        return HeadlessQRLogin()
-
-    @staticmethod
-    async def _close_headless(account: str, headless: HeadlessQRLogin) -> None:
-        """关闭无头登录客户端，清理失败只记录日志。"""
-        try:
-            await headless.close()
-        except Exception:
-            logger.exception(f"[agently] Web 登录关闭无头客户端失败：账号={account}")
 
     def _prune_login_sessions(self) -> None:
         """裁剪历史已结束的登录会话，避免内存无限增长。"""
@@ -484,99 +442,15 @@ class MailWebApi:
             self._login_sessions.pop(finished.pop(0), None)
 
     async def _cancel_session(self, session: _WebLoginSession) -> None:
-        """取消单次 Web 登录任务并等待清理完成。"""
+        """取消单次 Web 登录任务并等待清理完成，避免残留任务在取消后继续回推结果。"""
         task = session.task
-        if session.mail_choice is not None and not session.mail_choice.done():
-            session.mail_choice.cancel()
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if session.headless is not None:
-            headless = session.headless
-            session.headless = None
-            await self._close_headless(session.account, headless)
         if session.state not in {"success", "error", "expired"}:
             session.state = "cancelled"
-            session.qr_image = None
-            session.mails = None
         if self._active_login_id == session.session_id:
             self._active_login_id = None
-
-    async def _run_qr_side(self, session: _WebLoginSession) -> None:
-        """执行无头微信扫码轮询、邮箱查询、可选多邮箱选择与登录确认。"""
-        headless = session.headless
-        qr_session = session.qr_session
-        user_code = session.user_code
-        if headless is None or qr_session is None or not user_code:
-            raise HeadlessQRLoginError("invalid_state", "缺少无头扫码会话参数")
-
-        async def on_qr_status(status_code: int) -> None:
-            if status_code == 404 and session.state == "waiting_scan":
-                session.state = "scanned"
-                logger.debug(
-                    f"[agently] Web 登录已扫码等待确认：账号={session.account}，"
-                    f"会话={session.session_id}"
-                )
-
-        wx_code = await headless.poll_wx_code(
-            qr_session,
-            session.deadline,
-            on_status=on_qr_status,
-        )
-        func3_result = await headless.func3(user_code, wx_code, deadline=session.deadline)
-        session.func3_result = func3_result
-
-        if len(func3_result.mails) == 1:
-            mail = func3_result.mails[0]
-            if not mail.is_selected:
-                raise HeadlessQRLoginError(
-                    "invalid_response",
-                    "唯一可用邮箱没有 is_selected 标记",
-                )
-            chosen_email = mail.email
-        else:
-            session.mails = [
-                {"email": mail.email, "is_selected": mail.is_selected}
-                for mail in func3_result.mails
-            ]
-            session.mail_choice = asyncio.get_running_loop().create_future()
-            session.state = "select_mail"
-            logger.debug(
-                f"[agently] Web 登录等待多邮箱选择：账号={session.account}，"
-                f"候选数量={len(func3_result.mails)}"
-            )
-            remaining = session.deadline - time.monotonic()
-            if remaining <= 0:
-                raise HeadlessQRLoginError("expired", "登录流程已超时")
-            try:
-                chosen_email = await asyncio.wait_for(session.mail_choice, timeout=remaining)
-            except asyncio.TimeoutError as exc:
-                raise HeadlessQRLoginError("expired", "邮箱选择已超时") from exc
-
-        session.state = "authorizing"
-        await headless.func8(
-            user_code,
-            chosen_email,
-            func3_result.login_tmpticket,
-            deadline=session.deadline,
-        )
-
-    @staticmethod
-    def _map_headless_error(exc: HeadlessQRLoginError) -> tuple[str, str, str]:
-        """把无头登录错误映射为 (state, error_code, message)。"""
-        if exc.code in {"expired", "402"}:
-            return ("expired", "expired", "二维码或登录会话已过期，请刷新重试。")
-        if exc.code == "403":
-            return ("error", "wx_cancelled", "已在手机端取消登录授权。")
-        if exc.code == "-601":
-            return ("error", "wx_601", "微信登录返回 -601，系统失败或邮箱为空，请刷新重试。")
-        if exc.code == "-75111":
-            return ("error", "wx_75111", "微信登录返回 -75111，扫码链接已使用或流程不匹配，请刷新重试。")
-        if exc.code == "-5012":
-            return ("error", "wx_5012", "微信登录返回 -5012，登录票据已过期或已消费，请刷新重试。")
-        if exc.code == "transport_error":
-            return ("error", "transport_error", "微信扫码网络请求失败，请刷新重试或复制原链接授权。")
-        return ("error", "headless_error", exc.message or "扫码登录失败，请刷新重试。")
 
     async def _run_login_session(
         self,
@@ -584,50 +458,9 @@ class MailWebApi:
         client: AgentlyMailClient,
         oauth: OAuthClient,
     ) -> None:
-        """后台协同微信扫码与设备流轮询，任意一条链路完成授权即落盘凭证。"""
-        oauth_task: asyncio.Task[TokenBundle] = asyncio.create_task(
-            oauth.poll(session.flow, deadline=session.deadline)
-        )
-        qr_task: asyncio.Task[None] | None = (
-            asyncio.create_task(self._run_qr_side(session))
-            if session.mode == "qr"
-            else None
-        )
+        """后台轮询设备授权直到完成或超时，结束后刷新身份并更新会话状态。"""
         try:
-            if qr_task is None:
-                await oauth_task
-            else:
-                done, _pending = await asyncio.wait(
-                    {oauth_task, qr_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if oauth_task in done:
-                    qr_task.cancel()
-                    await asyncio.gather(qr_task, return_exceptions=True)
-                    oauth_task.result()
-                else:
-                    qr_exc = qr_task.exception()
-                    if qr_exc is None:
-                        await oauth_task
-                    elif (
-                        isinstance(qr_exc, HeadlessQRLoginError)
-                        and qr_exc.code in {"402", "expired"}
-                        and session.deadline > time.monotonic()
-                        and session.state in {"waiting_scan", "scanned"}
-                    ):
-                        # 微信二维码 2-3 分钟过期，但原设备流链接在 10 分钟内仍可完成授权。
-                        session.qr_expired = True
-                        session.qr_image = None
-                        session.mode = "browser"
-                        session.state = "waiting_scan"
-                        logger.info(
-                            f"[agently] Web 登录二维码过期，保留原链接监听：账号={session.account}"
-                        )
-                        await oauth_task
-                    else:
-                        oauth_task.cancel()
-                        await asyncio.gather(oauth_task, return_exceptions=True)
-                        raise qr_exc
+            await oauth.poll(session.flow, deadline=session.deadline)
         except asyncio.CancelledError:
             logger.debug(
                 f"[agently] Web 登录后台任务已取消：账号={session.account}，"
@@ -644,16 +477,8 @@ class MailWebApi:
         except (ExpiredTokenError, AuthorizationPendingError):
             session.state = "expired"
             session.error_code = "expired"
-            session.error = "登录二维码或授权链接已过期，请刷新重试。"
+            session.error = "登录授权已过期，请刷新重试。"
             logger.warning(f"[agently] Web 登录授权已过期：账号={session.account}")
-        except HeadlessQRLoginError as exc:
-            state, code, message = self._map_headless_error(exc)
-            session.state = state
-            session.error_code = code
-            session.error = message
-            logger.warning(
-                f"[agently] Web 无头登录失败：账号={session.account}，代码={exc.code}"
-            )
         except OAuthError as exc:
             session.state = "error"
             session.error_code = "oauth_error"
@@ -671,27 +496,10 @@ class MailWebApi:
             primary = next((a for a in me.aliases if a.is_primary), None) if me is not None else None
             session.email = (primary.email or primary.alias_id) if primary else None
             session.state = "success"
-            session.qr_image = None
-            session.qr_expired = False
-            session.mails = None
             session.error = None
             session.error_code = None
             logger.info(f"[agently] Web 登录完成：账号={session.account}")
         finally:
-            for child in (qr_task, oauth_task):
-                if child is not None and not child.done():
-                    child.cancel()
-            pending_children = [c for c in (qr_task, oauth_task) if c is not None]
-            if pending_children:
-                await asyncio.gather(*pending_children, return_exceptions=True)
-            if session.mail_choice is not None and not session.mail_choice.done():
-                session.mail_choice.cancel()
-            session.func3_result = None
-            session.qr_session = None
-            if session.headless is not None:
-                headless = session.headless
-                session.headless = None
-                await self._close_headless(session.account, headless)
             if self._active_login_id == session.session_id:
                 self._active_login_id = None
 
@@ -1247,7 +1055,7 @@ class MailWebApi:
 
     @_guarded
     async def login_start(self) -> Any:
-        """发起或刷新 WebUI 微信扫码登录，返回二维码图片、原链接和验证码。"""
+        """发起或刷新 WebUI 扫码登录，返回原授权链接和验证码。"""
         payload = await _read_json_body()
         raw_account = payload.get("account")
         if raw_account is None:
@@ -1277,47 +1085,12 @@ class MailWebApi:
                 raise WebApiError("发起登录失败，请稍后重试。", 502) from exc
             deadline = time.monotonic() + flow.expires_in
             expires_at = time.time() + flow.expires_in
-
-            headless: HeadlessQRLogin | None = None
-            qr_session: HeadlessQRSession | None = None
-            user_code: str | None = None
-            try:
-                user_code = HeadlessQRLogin.user_code_from_browser_url(flow.browser_url)
-                headless = self._make_headless()
-                qr_session = await _timed(
-                    headless.create_qr_session(deadline=deadline),
-                    READ_TIMEOUT,
-                )
-            except (HeadlessQRLoginError, WebApiError) as exc:
-                logger.warning(
-                    f"[agently] Web 无头二维码创建失败，降级复制链接模式：账号={account}，"
-                    f"代码={getattr(exc, 'code', None)}"
-                )
-                if headless is not None:
-                    await self._close_headless(account, headless)
-                headless = None
-                qr_session = None
-            except Exception:
-                logger.exception(
-                    f"[agently] Web 无头二维码创建异常，降级复制链接模式：账号={account}"
-                )
-                if headless is not None:
-                    await self._close_headless(account, headless)
-                headless = None
-                qr_session = None
-
-            mode = "qr" if (headless is not None and qr_session is not None and user_code) else "browser"
             session = _WebLoginSession(
                 session_id=uuid.uuid4().hex,
                 account=account,
-                mode=mode,
                 flow=flow,
                 deadline=deadline,
                 expires_at=expires_at,
-                qr_image=_qr_data_url(qr_session.image) if qr_session is not None else None,
-                headless=headless,
-                qr_session=qr_session,
-                user_code=user_code,
             )
             self._login_sessions[session.session_id] = session
             self._active_login_id = session.session_id
@@ -1329,13 +1102,10 @@ class MailWebApi:
             if isinstance(plugin_tasks, set):
                 plugin_tasks.add(task)
                 task.add_done_callback(plugin_tasks.discard)
-            # 让后台任务立即进入 try/finally 边界，避免返回后立刻卸载时跳过无头客户端清理。
+            # 让后台任务立即进入 try/finally 边界，避免返回后立刻卸载时跳过清理。
             await asyncio.sleep(0)
 
-            logger.info(
-                f"[agently] Web 登录已发起：账号={account}，会话={session.session_id}，"
-                f"模式={'二维码' if mode == 'qr' else '原链接'}"
-            )
+            logger.info(f"[agently] Web 登录已发起：账号={account}，会话={session.session_id}")
             return json_response(session.to_dict())
 
     @_guarded
@@ -1348,32 +1118,6 @@ class MailWebApi:
             raise WebApiError("登录会话不存在或已失效。", 404)
         return json_response(session.to_dict())
 
-    @_guarded
-    async def login_select(self) -> Any:
-        """多邮箱账号在扫码确认后选择目标邮箱。"""
-        payload = await _read_json_body()
-        session_id = _body_str(payload, "session_id")
-        _validate_identifier(session_id, "session_id")
-        email = _body_str(payload, "email")
-        session = self._login_sessions.get(session_id)
-        if session is None:
-            raise WebApiError("登录会话不存在或已失效。", 404)
-        if (
-            session.state != "select_mail"
-            or session.mail_choice is None
-            or session.mail_choice.done()
-            or not session.mails
-        ):
-            raise WebApiError("当前登录会话不处于邮箱选择阶段。", 409)
-        allowed = {str(item.get("email", "")) for item in session.mails}
-        if email not in allowed:
-            raise WebApiError("所选邮箱不在可用列表中。", 400)
-        session.state = "authorizing"
-        session.mail_choice.set_result(email)
-        logger.debug(
-            f"[agently] Web 登录已选择邮箱：账号={session.account}，会话={session.session_id}"
-        )
-        return json_response(session.to_dict())
 
     @_guarded
     async def login_cancel(self) -> Any:
@@ -1416,9 +1160,8 @@ def register_web_apis(plugin: QQAgentlyMailPlugin) -> MailWebApi:
         ("POST", "create_address", api.create_address, "新建邮箱地址"),
         ("POST", "modify_address", api.modify_address, "修改邮箱地址前缀"),
         ("POST", "delete_address", api.delete_address, "注销邮箱地址"),
-        ("POST", "login_start", api.login_start, "发起或刷新 WebUI 微信扫码登录"),
+        ("POST", "login_start", api.login_start, "发起或刷新 WebUI 扫码登录"),
         ("GET", "login_status", api.login_status, "查询 WebUI 扫码登录状态"),
-        ("POST", "login_select", api.login_select, "选择多邮箱账号的目标邮箱"),
         ("POST", "login_cancel", api.login_cancel, "中断 WebUI 扫码登录"),
     ]
     for method, name, handler, desc in routes:

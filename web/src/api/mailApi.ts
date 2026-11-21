@@ -96,7 +96,6 @@ export interface MailApi {
   deleteAddress(account: string, aliasId: string): Promise<DeleteAddressResult>;
   loginStart(account: string): Promise<WebLoginSession>;
   loginStatus(sessionId: string): Promise<WebLoginSession>;
-  loginSelect(sessionId: string, email: string): Promise<WebLoginSession>;
   loginCancel(sessionId?: string): Promise<LoginCancelResult>;
 }
 
@@ -161,12 +160,6 @@ export function createMailApi(bridge: AstrBotBridge): MailApi {
     },
     loginStatus(sessionId) {
       return bridge.apiGet<WebLoginSession>("login_status", { session_id: sessionId });
-    },
-    loginSelect(sessionId, email) {
-      return bridge.apiPost<WebLoginSession>("login_select", {
-        session_id: sessionId,
-        email,
-      });
     },
     loginCancel(sessionId) {
       return bridge.apiPost<LoginCancelResult>(
