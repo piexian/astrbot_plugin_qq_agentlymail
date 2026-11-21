@@ -131,10 +131,7 @@ astrbot_plugin_qq_agentlymail/
 ├── README.md                       # 使用说明
 ├── CHANGELOG.md                    # 更新日志
 ├── LICENSE                         # AGPL-3.0 许可协议
-├── .astrbot-plugin/i18n/
-│   └── zh-CN.json                  # 视图中文名称
-├── docs/
-│   └── web-api.md                  # WebUI 后端 API 契约文档
+├── .astrbot-plugin/i18n/           # 插件视图多语言名称
 ├── agentlymail/                    # 核心模块
 │   ├── client.py                   # 邮箱 HTTP 客户端、鉴权刷新与接口封装
 │   ├── constants.py                # 接口地址与常量定义
@@ -159,7 +156,6 @@ astrbot_plugin_qq_agentlymail/
 
 - [AstrBot 文档](https://docs.astrbot.app/)
 - [QQ Agent 邮箱](https://agent.qq.com/)
-- [Web API 契约说明](docs/web-api.md)
 - [Issues](https://github.com/piexian/astrbot_plugin_qq_agentlymail/issues)
 
 ## 许可

@@ -29,7 +29,7 @@ from .token_store import TokenStoreError
 if TYPE_CHECKING:
     from ..main import QQAgentlyMailPlugin
 
-# 附件上限取自 artifacts/api-map.md 的运行时约束观测值，服务器仍是最终权威。
+# 附件大小与数量上限，服务端仍是最终权威。
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_ATTACHMENT_COUNT = 50
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024

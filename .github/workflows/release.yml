@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - master
+    paths:
+      - "metadata.yaml"
   workflow_dispatch:
 
 permissions:
@@ -66,7 +68,7 @@ jobs:
           STAGE=astrbot_plugin_qq_agentlymail
           rm -rf "$STAGE" "${STAGE}-${{ steps.ver.outputs.tag }}.zip"
           mkdir -p "$STAGE"
-          cp -r .astrbot-plugin agentlymail docs views "$STAGE"/
+          cp -r .astrbot-plugin agentlymail views "$STAGE"/
           find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
           find "$STAGE" -type f -name '*.pyc' -delete
           cp CHANGELOG.md LICENSE README.md _conf_schema.json logo.png main.py metadata.yaml "$STAGE"/
