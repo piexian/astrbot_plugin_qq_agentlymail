@@ -41,9 +41,7 @@ from .tools import (
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENT_COUNT,
     MAX_TOTAL_ATTACHMENT_BYTES,
-    AgentlyMailSendTool,
     _safe_path_identifier,
-    _whitelist_blocked,
 )
 
 if TYPE_CHECKING:
@@ -1005,7 +1003,7 @@ class MailWebApi:
 
     @_guarded
     async def send(self) -> Any:
-        """发送邮件，复用 client 两阶段确认与发件白名单。"""
+        """发送邮件，复用 client 两阶段确认（WebUI 面向管理员，不受聊天发件白名单限制）。"""
         payload = await _read_json_body()
         account = _body_str(payload, "account")
         client, _bundle = await self._resolve_account(account)
@@ -1013,9 +1011,6 @@ class MailWebApi:
         to = _recipients(payload, "to", required=True)
         cc = _recipients(payload, "cc", required=False)
         bcc = _recipients(payload, "bcc", required=False)
-        blocked = _whitelist_blocked(self._plugin, to + cc + bcc)
-        if blocked is not None:
-            raise WebApiError(f"收件人不在发件白名单内：{blocked}。", 403)
         subject = _body_str(payload, "subject")
         _check_utf8_len(subject, MAX_SUBJECT_BYTES, "subject")
         body = _body_text(payload, "body")
@@ -1056,7 +1051,7 @@ class MailWebApi:
 
     @_guarded
     async def reply(self) -> Any:
-        """回复邮件；配置白名单时先读原信推导收件人校验。"""
+        """回复邮件（WebUI 面向管理员，不受聊天发件白名单限制）。"""
         payload = await _read_json_body()
         account = _body_str(payload, "account")
         client, _bundle = await self._resolve_account(account)
@@ -1069,14 +1064,6 @@ class MailWebApi:
         if body_format not in {"HTML", "PLAIN", "MARKDOWN"}:
             raise WebApiError("body_format 必须是 HTML/PLAIN/MARKDOWN 之一。")
         reply_all = _body_bool(payload, "reply_all", False)
-        if self._plugin._config.get("mail_send_whitelist"):
-            original = await _timed(client.read(message_id, alias_id=alias_id), READ_TIMEOUT)
-            recipients = AgentlyMailSendTool._reply_recipients(original, reply_all)
-            if not recipients:
-                raise WebApiError("无法确定回复收件人，不能安全校验白名单。")
-            blocked = _whitelist_blocked(self._plugin, recipients)
-            if blocked is not None:
-                raise WebApiError(f"收件人不在发件白名单内：{blocked}。", 403)
         await _timed(
             client.reply(
                 message_id,
@@ -1113,9 +1100,6 @@ class MailWebApi:
         message_id = _body_str(payload, "message_id")
         _validate_identifier(message_id, "message_id")
         to = _recipients(payload, "to", required=True)
-        blocked = _whitelist_blocked(self._plugin, to)
-        if blocked is not None:
-            raise WebApiError(f"收件人不在发件白名单内：{blocked}。", 403)
         body = _body_text(payload, "body")
         _check_utf8_len(body, MAX_BODY_TEXT_BYTES, "body")
         body_format = _body_str(payload, "body_format")

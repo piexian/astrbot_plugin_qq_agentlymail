@@ -303,6 +303,17 @@ def _string_list(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+def _is_webchat_event(event: AstrMessageEvent) -> bool:
+    """判断消息事件是否来自 AstrBot 内置 WebChat。"""
+    get_platform_name = getattr(event, "get_platform_name", None)
+    if callable(get_platform_name):
+        name = get_platform_name()
+        if isinstance(name, str) and name.strip().lower() == "webchat":
+            return True
+    umo = getattr(event, "unified_msg_origin", "")
+    return isinstance(umo, str) and umo.lower().startswith("webchat:")
+
+
 def _whitelist_blocked(
     plugin: QQAgentlyMailPlugin,
     recipients: list[str],
@@ -817,7 +828,13 @@ class AgentlyMailSendTool(FunctionTool):
             return None
         return body
 
-    def _check_whitelist(self, recipients: list[str]) -> ToolExecResult | None:
+    def _check_whitelist(
+        self,
+        event: AstrMessageEvent,
+        recipients: list[str],
+    ) -> ToolExecResult | None:
+        if _is_webchat_event(event):
+            return None
         blocked = _whitelist_blocked(self._plugin, recipients)
         if blocked is not None:
             return error_result(
@@ -859,7 +876,7 @@ class AgentlyMailSendTool(FunctionTool):
             return error_result("缺少 body 参数")
         body_format = kwargs.get("body_format") or "HTML"
         attachment_paths = _string_list(kwargs.get("attachment_paths"))
-        blocked = self._check_whitelist(to + cc + bcc)
+        blocked = self._check_whitelist(event, to + cc + bcc)
         if blocked is not None:
             return blocked
         try:
@@ -917,7 +934,7 @@ class AgentlyMailSendTool(FunctionTool):
         reply_all = kwargs.get("reply_all", False)
         if not isinstance(reply_all, bool):
             return error_result("reply_all 必须是布尔值")
-        if self._plugin._config.get("mail_send_whitelist"):
+        if not _is_webchat_event(event) and self._plugin._config.get("mail_send_whitelist"):
             original = await mailbox.client.read(
                 message_id,
                 alias_id=mailbox.alias_id,
@@ -928,7 +945,7 @@ class AgentlyMailSendTool(FunctionTool):
                     "无法确定回复收件人",
                     "已配置 mail_send_whitelist，无法安全校验本次回复的收件人。",
                 )
-            blocked = self._check_whitelist(recipients)
+            blocked = self._check_whitelist(event, recipients)
             if blocked is not None:
                 return blocked
         await mailbox.client.reply(
@@ -970,7 +987,7 @@ class AgentlyMailSendTool(FunctionTool):
         include_attachments = kwargs.get("include_attachments", True)
         if not isinstance(include_attachments, bool):
             return error_result("include_attachments 必须是布尔值")
-        blocked = self._check_whitelist(to)
+        blocked = self._check_whitelist(event, to)
         if blocked is not None:
             return blocked
         await mailbox.client.forward(
