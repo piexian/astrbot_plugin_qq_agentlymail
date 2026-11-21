@@ -2,7 +2,7 @@ name: astrbot_plugin_qq_agentlymail
 display_name: QQ Agently Mail
 author: piexian
 repo: https://github.com/piexian/astrbot_plugin_qq_agentlymail
-version: v0.1.0
+version: v0.2.0
 desc: 让你的 Bot 使用 QQ 官方 Agent 邮箱，支持收发邮件、新邮件提醒与 WebUI 管理
 astrbot_version: ">=4.16,<5"
 views:
